@@ -79,7 +79,7 @@ jobs:
         with:
           toolchain: stable
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-      - run: gem build protovalidate.gemspec --output tmp/protovalidate.gem
+      - run: mkdir -p tmp && gem build protovalidate.gemspec --output tmp/protovalidate.gem
       - run: gem install --no-document tmp/protovalidate.gem
       - name: Smoke test the installed gem
         run: |
@@ -143,6 +143,8 @@ jobs:
         run: |
           bundle exec rake proto:generate
           git diff --exit-code
+      # Scoped to our workflows: the checkout also holds gems under vendor/bundle.
       - uses: zizmorcore/zizmor-action@cc914d7f3750a2d13d75c7f184a1060aa0e9d482 # v0.6.4
         with:
+          inputs: .github/workflows
           advanced-security: false
