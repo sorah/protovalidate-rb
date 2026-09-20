@@ -9,3 +9,13 @@
 
 # rspec failure tracking
 .rspec_status
+
+# native extension build outputs
+/ext/protovalidate/target/
+/lib/protovalidate/*.so
+/lib/protovalidate/*.bundle
+/lib/protovalidate/[0-9]*.[0-9]*/
+
+# rbs collection checkout
+/.gem_rbs_collection/
+/licenses/

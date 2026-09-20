@@ -1,0 +1,4 @@
+# Conformance cases this implementation is known to fail, as
+# `suite: [case, ...]`. A listed case that passes fails the run, so keep this
+# in sync with reality. Empty means full conformance.
+{}

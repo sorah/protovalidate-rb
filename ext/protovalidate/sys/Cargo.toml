@@ -1,0 +1,11 @@
+[package]
+name = "protovalidate-cc-sys"
+version = "0.1.0"
+edition = "2024"
+publish = false
+links = "protovalidate_cc"
+description = "protovalidate-cc and its C++ dependencies, compiled from vendored sources behind a small C ABI"
+license = "Apache-2.0"
+
+[build-dependencies]
+cc = { version = "1", features = ["parallel"] }

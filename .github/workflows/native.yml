@@ -1,0 +1,174 @@
+name: Native gems
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  RUBY_BUILD_TAG: v20260917
+
+jobs:
+  build:
+    name: "${{ matrix.platform }} / Ruby ${{ matrix.ruby }}"
+    runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.container }}
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [x86_64-linux-gnu, aarch64-linux-gnu, arm64-darwin]
+        ruby: ['3.3.12', '3.4.10', '4.0.7']
+        include:
+          # manylinux_2_28 (AlmaLinux 8, glibc 2.28, GCC 14 toolset) keeps the
+          # Linux gems loadable on glibc 2.28 and newer.
+          - platform: x86_64-linux-gnu
+            runner: ubuntu-24.04
+            container: quay.io/pypa/manylinux_2_28_x86_64
+          - platform: aarch64-linux-gnu
+            runner: ubuntu-24.04-arm
+            container: quay.io/pypa/manylinux_2_28_aarch64
+          - platform: arm64-darwin
+            runner: macos-15
+            container: ''
+    env:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+      RB_SYS_CARGO_PROFILE: release
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      # Linux: Ruby is compiled inside the container, since prebuilt Rubies
+      # need a newer glibc than the image provides.
+      - name: Install Ruby build dependencies
+        if: runner.os == 'Linux'
+        # libyaml-devel sits in PowerTools (AlmaLinux 8) / CRB (9); clang-devel
+        # provides the libclang that rb-sys needs to generate Ruby bindings.
+        run: |
+          dnf install -y dnf-plugins-core
+          dnf config-manager --set-enabled powertools || dnf config-manager --set-enabled crb
+          dnf install -y libyaml-devel openssl-devel zlib-devel libffi-devel readline-devel gdbm-devel clang-devel
+      - name: Restore Ruby
+        if: runner.os == 'Linux'
+        id: ruby-cache
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: /opt/rubies/${{ matrix.ruby }}
+          key: ruby-${{ matrix.platform }}-${{ matrix.ruby }}-${{ env.RUBY_BUILD_TAG }}
+      - name: Build Ruby
+        if: runner.os == 'Linux' && steps.ruby-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch "$RUBY_BUILD_TAG" https://github.com/rbenv/ruby-build /tmp/ruby-build
+          RUBY_CONFIGURE_OPTS=--disable-install-doc /tmp/ruby-build/bin/ruby-build "$RUBY_VERSION" "/opt/rubies/$RUBY_VERSION"
+        env:
+          RUBY_VERSION: ${{ matrix.ruby }}
+      - name: Use the built Ruby
+        if: runner.os == 'Linux'
+        run: |
+          echo "/opt/rubies/$RUBY_VERSION/bin" >> "$GITHUB_PATH"
+          printf 'CC=gcc\nCXX=g++\n' >> "$GITHUB_ENV"
+        env:
+          RUBY_VERSION: ${{ matrix.ruby }}
+      - uses: ruby/setup-ruby@a0102e0972be65f351c307e2d64b9314a57c8073 # v1.324.0
+        if: runner.os == 'macOS'
+        with:
+          ruby-version: ${{ matrix.ruby }}
+          bundler-cache: false
+      - name: Name the C++ compiler for sccache
+        if: runner.os == 'macOS'
+        run: printf 'CC=clang\nCXX=clang++\n' >> "$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
+        with:
+          toolchain: stable
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+      - run: ruby -v && bundle install
+      - run: bundle exec rake compile
+
+      - name: Check the extension stays loadable on glibc 2.28
+        if: runner.os == 'Linux'
+        run: |
+          so=lib/protovalidate/protovalidate_native.so
+          newest() { objdump -T "$so" | grep -oE "$1_[0-9.]+" | sed "s/$1_//" | sort -uV | tail -1; }
+          check() { # name found ceiling
+            echo "$1: $2 (ceiling $3)"
+            [ -z "$2" ] || [ "$(printf '%s\n%s\n' "$2" "$3" | sort -V | tail -1)" = "$3" ] || { echo "$1 symbol newer than $3"; exit 1; }
+          }
+          check GLIBC "$(newest GLIBC)" 2.28
+          check GLIBCXX "$(newest GLIBCXX)" 3.4.25
+          check CXXABI "$(newest CXXABI)" 1.3.11
+      - name: Check the extension targets macOS 11
+        if: runner.os == 'macOS'
+        run: |
+          otool -l lib/protovalidate/protovalidate_native.bundle | grep -A4 LC_BUILD_VERSION
+          otool -l lib/protovalidate/protovalidate_native.bundle | grep -A4 LC_BUILD_VERSION | grep -q 'minos 11.0'
+
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: native-${{ matrix.platform }}-${{ matrix.ruby }}
+          path: lib/protovalidate/protovalidate_native.*
+          if-no-files-found: error
+
+  package:
+    name: "gem ${{ matrix.platform }}"
+    needs: build
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: x86_64-linux-gnu
+            runner: ubuntu-24.04
+          - platform: aarch64-linux-gnu
+            runner: ubuntu-24.04-arm
+          - platform: arm64-darwin
+            runner: macos-15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - uses: ruby/setup-ruby@a0102e0972be65f351c307e2d64b9314a57c8073 # v1.324.0
+        with:
+          ruby-version: '4.0'
+          bundler-cache: true
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: native-${{ matrix.platform }}-*
+          path: tmp/native
+      - name: Stage extensions per Ruby minor
+        run: |
+          for dir in tmp/native/native-*; do
+            version="${dir##*-}"
+            minor="${version%.*}"
+            mkdir -p "lib/protovalidate/$minor"
+            cp "$dir"/protovalidate_native.* "lib/protovalidate/$minor/"
+          done
+          find lib/protovalidate -name 'protovalidate_native.*'
+      - run: bundle exec rake "gem:native[${{ matrix.platform }}]"
+      - name: Smoke test the gem
+        run: |
+          gem install --no-document pkg/protovalidate-*.gem
+          ruby -e '
+            require "protovalidate"
+            require "protovalidate_spec/messages_pb"
+            violations = Protovalidate.collect_violations(ProtovalidateSpec::User.new(name: "", email: "x"))
+            puts violations
+            abort "expected violations" if violations.size != 2
+          ' -I spec/gen
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: gem-${{ matrix.platform }}
+          path: pkg/*.gem
+          if-no-files-found: error

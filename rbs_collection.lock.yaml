@@ -1,0 +1,36 @@
+---
+path: ".gem_rbs_collection"
+gems:
+- name: fileutils
+  version: '0'
+  source:
+    type: stdlib
+- name: io-console
+  version: '0'
+  source:
+    type: stdlib
+- name: pp
+  version: '0'
+  source:
+    type: stdlib
+- name: prettyprint
+  version: '0'
+  source:
+    type: stdlib
+- name: prism
+  version: 1.9.0
+  source:
+    type: rubygems
+- name: rake
+  version: '13.0'
+  source:
+    type: git
+    name: ruby/gem_rbs_collection
+    revision: fc4937d0c5874a8126ecb634f46f106595253848
+    remote: https://github.com/ruby/gem_rbs_collection.git
+    repo_dir: gems
+- name: rdoc
+  version: '0'
+  source:
+    type: stdlib
+gemfile_lock_path: Gemfile.lock

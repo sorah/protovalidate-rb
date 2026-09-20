@@ -1,0 +1,14 @@
+module Protovalidate
+  # Binding to protovalidate-cc, implemented by the native extension.
+  module Native
+    # A descriptor pool plus a rule cache. Bytes in, bytes out.
+    class Engine
+      # Adds a serialized google.protobuf.FileDescriptorProto to the pool.
+      def add_file: (String file) -> void
+
+      # Validates a serialized message of the named type; returns serialized
+      # buf.validate.Violations, or nil when the message is valid.
+      def validate: (String type_name, String payload, bool fail_fast) -> String?
+    end
+  end
+end

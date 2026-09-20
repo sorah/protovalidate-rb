@@ -1,0 +1,737 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Copyright (c) 2023-2026 Buf Technologies, Inc.
+# Copyright (c) 2026 Sorah Fukumori
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Regenerates the C++ build inputs of the native extension. Adapted from
+# protovalidate-py's scripts/extract_native_sources.py.
+#
+# To bump protovalidate-cc, edit ext/protovalidate/sys/versions.json and run
+# this script: it moves the third_party/ submodules to match and rewrites
+# everything derived from them. It needs bazel (bazelisk), and only runs during
+# a bump, never during a gem build.
+#
+# 1. Fetches protovalidate-cc at the pinned ref and applies module overrides.
+# 2. Builds a probe binary from the extension's real shim plus a trivial main.
+#    Compiling the shim checks it against the pinned versions; the binary's
+#    link anchors the closure below.
+# 3. Reads the probe's link closure from the action graph to decide which C++
+#    source files the extension needs. A deps() query would also list tooling
+#    and test dependencies, which are not vendored.
+# 4. Checks the submodules out at the versions bazel resolved.
+# 5. Writes one filelist per static library, verifying every file exists.
+# 6. Copies bazel-generated sources (ANTLR parser, .pb.cc/.pb.h, cel-cpp's
+#    descriptor-set embed) into gen/, the only sources checked in because no
+#    upstream tree contains them.
+
+require "digest"
+require "fileutils"
+require "json"
+require "net/http"
+require "open3"
+require "pathname"
+require "set"
+require "uri"
+
+module ExtractNativeSources
+  REPO_ROOT = Pathname(__dir__).parent.expand_path
+  CRATE = REPO_ROOT / "ext/protovalidate/sys"
+  CONFIG_PATH = CRATE / "versions.json"
+  WORK_DIR = REPO_ROOT / "tmp/native-extract"
+  VERSION_RB = REPO_ROOT / "lib/protovalidate/version.rb"
+
+  # Where a bazel repo's sources live in the crate.
+  #
+  # library: filelist basename; one static library per upstream project.
+  # submodule: directory under third_party/, or nil when the repo contributes
+  #   generated code only (its .proto inputs are never compiled).
+  # prefix: path within the submodule the bazel module root maps to.
+  # tag: upstream git tag for a resolved module version.
+  # include_roots: include roots within the submodule, mirroring build.rs. A
+  #   bazel-generated file the submodule already ships under one of these is
+  #   not checked in again.
+  Repo = Data.define(:library, :submodule, :prefix, :tag, :include_roots) do
+    def initialize(library:, submodule:, prefix: "", tag: "{version}", include_roots: [""])
+      super
+    end
+  end
+
+  # Canonical bazel repo name -> where its sources live.
+  REPOS = {
+    "abseil-cpp+" => Repo.new(library: "absl", submodule: "abseil-cpp"),
+    "protobuf+" => Repo.new(
+      library: "protobuf", submodule: "protobuf", tag: "v{version}",
+      include_roots: ["src", "third_party/utf8_range"],
+    ),
+    "re2+" => Repo.new(library: "re2", submodule: "re2"),
+    "antlr4-cpp-runtime+" => Repo.new(
+      library: "antlr4", submodule: "antlr4", prefix: "runtime/Cpp",
+      include_roots: ["runtime/Cpp/runtime/src"],
+    ),
+    "cel-cpp+" => Repo.new(library: "celcpp", submodule: "cel-cpp", tag: "v{version}"),
+    "cel-spec+" => Repo.new(library: "celcpp", submodule: nil),
+    "protovalidate+" => Repo.new(library: "protovalidate", submodule: nil),
+    "_main" => Repo.new(library: "protovalidate", submodule: "protovalidate-cc"),
+  }.freeze
+  # Registry module name -> bazel repo name, for driving the submodules.
+  MODULE_TO_REPO = {
+    "abseil-cpp" => "abseil-cpp+",
+    "protobuf" => "protobuf+",
+    "re2" => "re2+",
+    "antlr4-cpp-runtime" => "antlr4-cpp-runtime+",
+    "cel-cpp" => "cel-cpp+",
+  }.freeze
+  REPO_TO_MODULE = MODULE_TO_REPO.invert.freeze
+  # protovalidate never touches protobuf's zlib-backed streams, so zlib is not
+  # vendored. build.rs does not define HAVE_ZLIB, which upstream would.
+  SKIP_REPOS = Set["zlib+"].freeze
+
+  VENDOR_HEADER_SUFFIXES = [".h", ".hpp", ".inc", ".def"].freeze
+
+  COMMIT_SHA = /\A[0-9a-f]{40}\z/
+
+  # The probe package this script injects into the extraction workspace.
+  PROBE_PACKAGE = "pv_extract"
+
+  # Maps bazel platform-select condition labels (canonical form, leading @s
+  # stripped) to cargo's CARGO_CFG_TARGET_OS values.
+  SELECT_KEY_TO_TARGET_OS = {
+    "platforms//os:windows" => "windows",
+    "platforms//os:linux" => "linux",
+    "platforms//os:osx" => "macos",
+    "platforms//os:macos" => "macos",
+  }.freeze
+
+  class ExtractionError < StandardError; end
+
+  module_function def copy_file(src, dst)
+    dst.dirname.mkpath
+    # An unchanged file keeps its mtime so cargo's fingerprints stay valid.
+    return if dst.file? && dst.binread == src.binread
+
+    FileUtils.cp(src, dst)
+    # bazel-out files are read-only and sometimes executable; normalize so a
+    # later copy can overwrite and git records no stray executable bits.
+    dst.chmod(0o644)
+  end
+
+  module_function def run(cmd, cwd:, capture: false)
+    shown = cmd.first(6).join(" ")
+    shown += " ..." if cmd.size > 6
+    puts "  $ #{shown}"
+    if capture
+      out, status = Open3.capture2(*cmd, chdir: cwd.to_s)
+      raise ExtractionError, "#{cmd.first} failed (#{status.exitstatus})" unless status.success?
+
+      out
+    else
+      system(*cmd, chdir: cwd.to_s, exception: true)
+      ""
+    end
+  end
+
+  # Runs a command that is allowed to fail, reporting whether it worked.
+  module_function def try_run(cmd, cwd:)
+    puts "  $ #{cmd.first(6).join(" ")}#{cmd.size > 6 ? " ..." : ""}"
+    system(*cmd, chdir: cwd.to_s)
+  end
+
+  # Indexed view over one `bazel aquery --output=jsonproto` result.
+  class Aquery
+    attr_reader :data
+
+    def initialize(text)
+      @data = JSON.parse(text)
+      @artifacts = data.fetch("artifacts", []).to_h { |a| [a.fetch("id"), a] }
+      @fragments = data.fetch("pathFragments", []).to_h { |f| [f.fetch("id"), f] }
+      @depsets = data.fetch("depSetOfFiles", []).to_h { |s| [s.fetch("id"), s] }
+    end
+
+    def path(artifact_id)
+      parts = []
+      fragment_id = @artifacts.fetch(artifact_id).fetch("pathFragmentId")
+      loop do
+        fragment = @fragments.fetch(fragment_id)
+        parts << fragment.fetch("label")
+        break unless fragment.key?("parentId")
+
+        fragment_id = fragment.fetch("parentId")
+      end
+      parts.reverse.join("/")
+    end
+
+    def expand(depset_ids)
+      found = Set.new
+      seen = Set.new
+      stack = depset_ids.dup
+      until stack.empty?
+        current = stack.pop
+        next unless seen.add?(current)
+
+        depset = @depsets[current]
+        next if depset.nil?
+
+        found.merge(depset.fetch("directArtifactIds", []))
+        stack.concat(depset.fetch("transitiveDepSetIds", []))
+      end
+      found
+    end
+
+    def actions(mnemonic)
+      data.fetch("actions", []).select { |a| a.fetch("mnemonic") == mnemonic }
+    end
+  end
+
+  # Downloads and unpacks a GitHub source archive at a pinned ref.
+  module_function def fetch_source_archive(spec, destination)
+    url = spec.fetch("archive").gsub("{ref}", spec.fetch("ref"))
+    cache = WORK_DIR / "cache"
+    cache.mkpath
+    archive = cache / "#{spec.fetch("ref")}.tar.gz"
+
+    unless archive.exist?
+      puts "downloading #{url}"
+      archive.binwrite(download(url))
+    end
+
+    digest = Digest::SHA256.file(archive).hexdigest
+    expected = spec["sha256"]
+    if expected && digest != expected
+      archive.delete
+      raise ExtractionError, "checksum mismatch for #{url}\n  expected #{expected}\n  got      #{digest}"
+    end
+    puts "  note: no sha256 pinned; archive digest is #{digest}" unless expected
+
+    puts "unpacking protovalidate-cc #{spec.fetch("ref")}"
+    destination.mkpath
+    # GitHub archives nest everything under a single <repo>-<ref>/ directory.
+    run(["tar", "-xzf", archive.to_s, "-C", destination.to_s, "--strip-components=1"], cwd: REPO_ROOT)
+  end
+
+  module_function def download(url, limit = 5)
+    raise ExtractionError, "too many redirects for #{url}" if limit.zero?
+
+    response = Net::HTTP.get_response(URI(url))
+    case response
+    when Net::HTTPSuccess then response.body
+    when Net::HTTPRedirection then download(response["location"], limit - 1)
+    else raise ExtractionError, "#{url}: #{response.code} #{response.message}"
+    end
+  end
+
+  # Fetches protovalidate-cc at the pinned ref and applies module overrides.
+  module_function def prepare_workspace(config)
+    pvcc = config.fetch("protovalidate_cc")
+    work = WORK_DIR / "protovalidate-cc"
+    stamp = work / ".extract-ref"
+    if work.exist? && stamp.exist? && stamp.read.strip == pvcc.fetch("ref")
+      puts "reusing existing source tree at #{work} (#{pvcc.fetch("ref")})"
+    else
+      work.rmtree if work.exist?
+      fetch_source_archive(pvcc, work)
+      stamp.write("#{pvcc.fetch("ref")}\n")
+    end
+
+    module_file = work / "MODULE.bazel"
+    text = module_file.read
+    marker = "# --- protovalidate-rb extraction overrides ---"
+    overrides = config.fetch("module_overrides", {}).reject { |name, _| name.start_with?("_") }.map do |name, version|
+      "single_version_override(\n    module_name = \"#{name}\",\n    version = \"#{version}\",\n)"
+    end
+    updated = "#{text.split(marker, 2).first.sub(/\n+\z/, "")}\n\n#{marker}\n#{overrides.join("\n")}\n"
+    if updated != text
+      module_file.write(updated)
+      # The lock pins the old resolution; drop it so bazel re-resolves.
+      (work / "MODULE.bazel.lock").delete if (work / "MODULE.bazel.lock").exist?
+    end
+
+    write_probe_package(work)
+    work
+  end
+
+  # Configuration flags for every bazel build/aquery the extraction runs.
+  module_function def bazel_flags(config)
+    flags = [
+      "--incompatible_strict_action_env",
+      # Java is needed to generate the CEL parser with ANTLR.
+      "--java_runtime_version=#{config.fetch("bazel").fetch("java_runtime_version")}",
+      # protovalidate-cc and cel-cpp may pin different versions; take the highest quietly.
+      "--check_direct_dependencies=off",
+    ]
+    if RUBY_PLATFORM.include?("darwin")
+      flags += [
+        "--repo_env=BAZEL_NO_APPLE_CPP_TOOLCHAIN=1",
+        "--macos_minimum_os=10.15",
+        "--cxxopt=-faligned-allocation",
+      ]
+    end
+    flags
+  end
+
+  module_function def write_probe_package(work)
+    probe = work / PROBE_PACKAGE
+    probe.rmtree if probe.exist?
+    probe.mkpath
+    ["pv_shim.h", "pv_shim.cc"].each { |name| FileUtils.cp(CRATE / "shim" / name, probe / name) }
+    # The main only has to make the binary linkable; the vendored set comes
+    # from the link action's inputs, so nothing needs to reference the shim's
+    # symbols. pv_shim.cc being a src is what compile-checks the shim.
+    (probe / "probe_main.cc").write("int main() { return 0; }\n")
+    (probe / "BUILD").write(<<~BUILD)
+      cc_binary(
+          name = "probe",
+          srcs = ["pv_shim.cc", "pv_shim.h", "probe_main.cc"],
+          deps = ["//buf/validate:validator"],
+      )
+    BUILD
+  end
+
+  module_function def build_probe(work, flags)
+    puts "building probe"
+    run(["bazel", "build", *flags, "//#{PROBE_PACKAGE}:probe"], cwd: work)
+  end
+
+  # Maps the probe's link inputs back to the source files that fed them:
+  # the .o and .a files of the final link, the .o files inside those .a
+  # files, and the source that produced each .o.
+  module_function def collect_link_closure(work, flags)
+    probe = "//#{PROBE_PACKAGE}:probe"
+    expr = "mnemonic(\"CppLink|CppArchive|CppCompile\", deps(#{probe}))"
+    graph = Aquery.new(run(["bazel", "aquery", *flags, "--output=jsonproto", expr], cwd: work, capture: true))
+
+    # deps() reaches exec-configuration tooling like protoc, so the probe's
+    # own link action is picked out by its output path.
+    link_actions = graph.actions("CppLink").select do |action|
+      graph.path(action.fetch("outputIds").first).end_with?("/#{PROBE_PACKAGE}/probe")
+    end
+    unless link_actions.size == 1
+      raise ExtractionError, "expected exactly one probe link action, got #{link_actions.size}"
+    end
+
+    link_inputs = graph.expand(link_actions.first.fetch("inputDepSetIds")).map { |i| graph.path(i) }.to_set
+
+    archive_objects = graph.actions("CppArchive").to_h do |action|
+      out = graph.path(action.fetch("outputIds").first)
+      objects = graph.expand(action.fetch("inputDepSetIds")).map { |i| graph.path(i) }
+      [out, objects.select { |o| o.end_with?(".o") }.to_set]
+    end
+
+    needed = link_inputs.select { |p| p.end_with?(".o") }.to_set
+    link_inputs.select { |p| p.end_with?(".a") }.each { |path| needed.merge(archive_objects.fetch(path)) }
+
+    # Header-parsing actions (`-fsyntax-only`, `.processed` outputs) share the
+    # mnemonic but compile nothing the link consumes.
+    object_to_source = graph.actions("CppCompile").filter_map do |action|
+      args = action.fetch("arguments")
+      position = args.index("-c")
+      next if position.nil?
+
+      [graph.path(action.fetch("outputIds").first), args.fetch(position + 1)]
+    end.to_h
+
+    sources = Hash.new { |h, k| h[k] = Set.new }
+    generated = Hash.new { |h, k| h[k] = Set.new }
+    needed.each do |obj|
+      source = object_to_source.fetch(obj)
+      repo = bazel_repo(source)
+      next if SKIP_REPOS.include?(repo)
+      # The shim and probe main are not vendored sources.
+      next if repo == "_main" && source.start_with?("#{PROBE_PACKAGE}/")
+
+      if source.start_with?("bazel-out/")
+        generated[repo] << source
+      else
+        sources[repo] << source
+      end
+    end
+
+    [sources, generated]
+  end
+
+  # The bazel repo a source path belongs to, generated outputs included.
+  module_function def bazel_repo(source)
+    if source.start_with?("bazel-out/")
+      return source.split("/bin/external/", 2).last.split("/", 2).first if source.include?("/bin/external/")
+
+      return "_main"
+    end
+    return source.split("/")[1] if source.start_with?("external/")
+
+    "_main"
+  end
+
+  # Where a generated source belongs inside gen/, with the prefixes bazel adds
+  # per kind of file stripped.
+  module_function def generated_destination(source)
+    ["_virtual_imports/", "_virtual_includes/"].each do |marker|
+      next unless source.include?(marker)
+
+      return source.split(marker, 2).last.split("/", 2).last
+    end
+    return source.split("/bin/external/", 2).last.split("/", 2).last if source.include?("/bin/external/")
+
+    source.split("/bin/", 2).last
+  end
+
+  # Splits a canonical label into [repo, repo-relative path].
+  module_function def parse_label(label)
+    repo, _, rest = label.delete_prefix("@").delete_prefix("@").partition("//")
+    package, _, name = rest.partition(":")
+    [repo.empty? ? "_main" : repo, package.empty? ? name : "#{package}/#{name}"]
+  end
+
+  # Finds sources that bazel adds via platform select(), per repo.
+  #
+  # The extraction host's link closure only contains that host's selection,
+  # so the other platforms' branches are read from the unconfigured target
+  # graph, which preserves select() structure when asked not to flatten it.
+  # Only packages already contributing a file to the closure are considered.
+  module_function def collect_platform_sources(work, sources)
+    packages = Hash.new { |h, k| h[k] = Set.new }
+    sources.each do |repo, files|
+      files.each do |file|
+        rel = repo == "_main" ? file : file.split("external/#{repo}/", 2).last
+        packages[repo] << File.dirname(rel)
+      end
+    end
+
+    text = run(
+      [
+        "bazel", "query", "--output=streamed_jsonproto", "--proto:flatten_selects=false",
+        "--consistent_labels", "kind(\"cc_.*\", deps(//#{PROBE_PACKAGE}:probe))",
+      ],
+      cwd: work, capture: true,
+    )
+
+    found = Hash.new { |h, k| h[k] = Set.new }
+    text.each_line do |line|
+      next if line.strip.empty?
+
+      rule = JSON.parse(line)["rule"]
+      next if rule.nil?
+
+      rule_repo, rule_path = parse_label(rule.fetch("name"))
+      rule_package = File.dirname(rule_path)
+      next unless packages.fetch(rule_repo, Set.new).any? { |p| p == rule_package || p.start_with?("#{rule_package}/") }
+
+      rule.fetch("attribute", []).each do |attribute|
+        next unless attribute.fetch("name") == "srcs" && attribute.key?("selectorList")
+
+        attribute.fetch("selectorList").fetch("elements", []).each do |element|
+          element.fetch("entries", []).each do |entry|
+            label = entry.fetch("label")
+            target_os = SELECT_KEY_TO_TARGET_OS[label.delete_prefix("@").delete_prefix("@")]
+            files = entry.fetch("stringListValue", []).select { |l| l.end_with?(".cc", ".cpp") }.map { |l| parse_label(l).last }
+            next if files.empty?
+
+            if target_os.nil?
+              warn "  warning: unmapped select key #{label} with sources in #{rule.fetch("name")}" unless label.end_with?("//conditions:default")
+              next
+            end
+            files.each { |file| found[rule_repo] << [target_os, file] }
+          end
+        end
+      end
+    end
+    found
+  end
+
+  # Regenerates the checked-in generated sources and the filelists. Upstream
+  # sources are not copied: they are git submodules, so only which files to
+  # compile is recorded.
+  module_function def vendor(work, sources, generated)
+    execroot = Pathname(run(["bazel", "info", "execution_root"], cwd: work, capture: true).strip)
+
+    filelists = Hash.new { |h, k| h[k] = [] }
+    platform_sources = collect_platform_sources(work, sources)
+    record_sources(sources, platform_sources, filelists)
+    written = vendor_generated(execroot, generated, filelists)
+    prune_generated(written)
+    write_filelists(filelists)
+  end
+
+  # Crate-relative path of an upstream source file.
+  module_function def submodule_path(repo, rel)
+    spec = REPOS.fetch(repo)
+    parts = ["third_party", spec.submodule]
+    parts << spec.prefix unless spec.prefix.empty?
+    parts << rel
+    parts.join("/")
+  end
+
+  # Records upstream C++ source files as paths into the submodules.
+  module_function def record_sources(sources, platform_sources, filelists)
+    missing = []
+    sources.sort.each do |repo, files|
+      spec = REPOS[repo]
+      if spec.nil?
+        warn "  warning: no mapping for repo #{repo}, skipping"
+        next
+      end
+      raise ExtractionError, "#{repo} contributes sources but has no submodule" if spec.submodule.nil?
+
+      rel_files = files.map { |f| repo == "_main" ? f : f.split("external/#{repo}/", 2).last }.sort
+      entries = rel_files.map { |rel| ["", rel] }
+      entries += platform_sources.fetch(repo, Set.new).sort.map { |target_os, rel| ["#{target_os}:", rel] }
+      entries.each do |prefix, rel|
+        path = submodule_path(repo, rel)
+        missing << "#{repo}: #{path}" unless (CRATE / path).file?
+        filelists[spec.library] << prefix + path
+      end
+    end
+    return if missing.empty?
+
+    raise ExtractionError, <<~MESSAGE
+      #{missing.size} source(s) missing from the submodules, e.g.:
+        #{missing.first(20).join("\n  ")}
+      Run `git submodule update --init --recursive`, and check the pins match the versions bazel resolved.
+    MESSAGE
+  end
+
+  # The submodule's own copy of a bazel-generated file, if it has one.
+  module_function def upstream_copy(spec, dest)
+    return nil if spec.submodule.nil?
+
+    root = CRATE / "third_party" / spec.submodule
+    spec.include_roots.each do |include_root|
+      candidate = include_root.empty? ? root / dest : root / include_root / dest
+      return candidate if candidate.file?
+    end
+    nil
+  end
+
+  # Drops DLL-visibility annotations before comparing generated code: bazel
+  # regenerates the well-known types for static compilation, and the
+  # submodule's copy carries export macros the regenerated one lacks.
+  module_function def visibility_normalized(bytes)
+    bytes.gsub(/PROTOBUF_EXPORT_TEMPLATE_(DECLARE|DEFINE)|PROTOBUF_EXPORT/, "").split.join(" ")
+  end
+
+  # Copies bazel-generated sources into gen/.
+  module_function def vendor_generated(execroot, generated, filelists)
+    merged = Hash.new { |h, k| h[k] = Set.new }
+    generated.each { |repo, files| merged[repo].merge(files) }
+    (execroot / "bazel-out").find do |path|
+      next unless path.file? && VENDOR_HEADER_SUFFIXES.include?(path.extname)
+
+      source = path.relative_path_from(execroot).to_s
+      next if source.split("/")[1].include?("-exec")
+
+      merged[bazel_repo(source)] << source
+    end
+    written = Set.new
+    merged.sort.each do |repo, files|
+      next if SKIP_REPOS.include?(repo)
+
+      spec = REPOS[repo]
+      if spec.nil?
+        warn "  warning: no mapping for generated repo #{repo}"
+        next
+      end
+      gen_dir = CRATE / "gen"
+      files.sort.each do |source|
+        dest = generated_destination(source)
+        # A genrule that re-stages its inputs leaves them under its own
+        # output directory, so the repo tree reappears inside the path.
+        next if dest.include?("external/")
+
+        payload = (execroot / source).binread
+        existing = upstream_copy(spec, dest)
+        if existing
+          if visibility_normalized(existing.binread) != visibility_normalized(payload)
+            raise ExtractionError, "#{existing.relative_path_from(CRATE)} differs from what bazel generated at " \
+              "#{dest}. Compiling the submodule's copy would no longer match what bazel built."
+          end
+          filelists[spec.library] << existing.relative_path_from(CRATE).to_s if dest.end_with?(".cc", ".cpp")
+          next
+        end
+        copy_file(execroot / source, gen_dir / dest)
+        written << gen_dir / dest
+        filelists[spec.library] << "gen/#{dest}" if dest.end_with?(".cc", ".cpp")
+      end
+    end
+    written
+  end
+
+  # Drops files a previous extraction left in gen/.
+  module_function def prune_generated(written)
+    gen_dir = CRATE / "gen"
+    return unless gen_dir.directory?
+
+    gen_dir.find.to_a.sort.reverse_each do |path|
+      if path.file? && !written.include?(path)
+        path.delete
+      elsif path.directory? && path != gen_dir && path.empty?
+        path.rmdir
+      end
+    end
+  end
+
+  # Writes one filelist per static library, only when the content changes.
+  module_function def write_filelists(filelists)
+    filelists.sort.each do |library, files|
+      path = CRATE / "filelists" / "#{library}.txt"
+      path.dirname.mkpath
+      content = <<~HEADER + "#{files.sort.join("\n")}\n"
+        # Generated by script/extract-native-sources -- do not edit.
+        # C++ sources the extension compiles, relative to this crate's directory.
+        # A `windows:`/`linux:`/`macos:` prefix compiles a file on that OS only.
+      HEADER
+      path.write(content) if !path.exist? || path.read != content
+    end
+  end
+
+  # Resolved module versions and the registry hashes that identify them.
+  module_function def module_versions(work)
+    data = JSON.parse((work / "MODULE.bazel.lock").read)
+    data.fetch("registryFileHashes", {}).sort.each_with_object({}) do |(url, digest), versions|
+      next unless url.end_with?("/source.json")
+
+      parts = url.chomp("/").split("/")
+      versions[parts[-3]] = {"version" => parts[-2], "source_json_sha256" => digest, "url" => url}
+    end
+  end
+
+  # Fails if the linked protovalidate differs from what the gem targets.
+  module_function def check_protovalidate_version(versions)
+    resolved = versions.dig("protovalidate", "version")
+    targeted = VERSION_RB.read[/PROTOVALIDATE_VERSION = "([^"]+)"/, 1]
+    return if resolved.nil? || targeted.nil? || resolved == targeted
+
+    raise ExtractionError, "linked protovalidate is #{resolved} but this gem targets #{targeted} " \
+      "(lib/protovalidate/version.rb). Violation messages would differ from what conformance tests. " \
+      "Pin a protovalidate-cc ref that targets #{targeted}, or move version.rb with it."
+  end
+
+  # Runs a read-only git command in `path`, quietly.
+  module_function def git(path, *args, check: true)
+    out, err, status = Open3.capture3("git", "-C", path.to_s, *args)
+    unless status.success?
+      raise ExtractionError, "git #{args.join(" ")} in #{path} failed: #{err.strip}" if check
+
+      return ""
+    end
+    out.strip
+  end
+
+  # The upstream ref to move a submodule to, matching a bazel dependency version.
+  module_function def wanted_ref(repo, spec, versions, config)
+    return config.fetch("protovalidate_cc").fetch("ref") if repo == "_main"
+
+    mod = REPO_TO_MODULE[repo]
+    resolved = mod && versions.dig(mod, "version")
+    return nil if resolved.nil?
+
+    # Registry-only republishes (`2025-11-05.bcr.1`) carry bazel packaging
+    # fixes; upstream is tagged without the suffix.
+    spec.tag.gsub("{version}", resolved.split(".bcr.").first)
+  end
+
+  # Resolves a tag or commit to a commit id, fetching it when absent.
+  module_function def resolve_in_submodule(path, ref)
+    ["#{ref}^{commit}", "refs/tags/#{ref}^{commit}"].each do |candidate|
+      found = git(path, "rev-parse", "--verify", "--quiet", candidate, check: false)
+      return found unless found.empty?
+    end
+    fetches = [["origin", ref]]
+    fetches.unshift(["origin", "tag", ref]) unless COMMIT_SHA.match?(ref)
+    fetches.each do |fetch_args|
+      next unless try_run(["git", "-C", path.to_s, "fetch", "--depth", "1", *fetch_args], cwd: REPO_ROOT)
+
+      ["#{ref}^{commit}", "FETCH_HEAD^{commit}"].each do |candidate|
+        found = git(path, "rev-parse", "--verify", "--quiet", candidate, check: false)
+        return found unless found.empty?
+      end
+    end
+    raise ExtractionError, "could not resolve #{ref} in #{path}"
+  end
+
+  # Checks the submodules out at the versions bazel resolved.
+  module_function def sync_submodules(versions, config)
+    puts "\nsubmodules:"
+    moved = []
+    REPOS.sort.each do |repo, spec|
+      next if spec.submodule.nil?
+
+      ref = wanted_ref(repo, spec, versions, config)
+      next if ref.nil?
+
+      path = CRATE / "third_party" / spec.submodule
+      run(["git", "submodule", "update", "--init", "--", path.to_s], cwd: REPO_ROOT) unless (path / ".git").exist?
+      want = resolve_in_submodule(path, ref)
+      head = git(path, "rev-parse", "HEAD")
+      if head == want
+        puts format("  %-18s %-14s %s ok", spec.submodule, ref, head[0, 12])
+        next
+      end
+      # Pending changes in a submodule may be experimental work; do not overwrite them.
+      dirty = git(path, "status", "--porcelain")
+      unless dirty.empty?
+        raise ExtractionError, "#{path} has uncommitted changes and needs to move to #{ref} (#{want[0, 12]}). " \
+          "Commit, stash, or discard them first."
+      end
+      run(["git", "-C", path.to_s, "checkout", "--detach", want], cwd: REPO_ROOT)
+      puts format("  %-18s %-14s %s -> %s", spec.submodule, ref, head[0, 12], want[0, 12])
+      moved << spec.submodule
+    end
+    puts "  moved #{moved.size}; commit the updated gitlinks with the filelists" unless moved.empty?
+  end
+
+  module_function def main
+    config = JSON.parse(CONFIG_PATH.read)
+    raise ExtractionError, "bazel is required to run the extraction" if system("which bazel >/dev/null 2>&1") == false
+
+    work = prepare_workspace(config)
+    build_flags = bazel_flags(config)
+    build_probe(work, build_flags)
+    sources, generated = collect_link_closure(work, build_flags)
+    versions = module_versions(work)
+    check_protovalidate_version(versions)
+
+    destination = ->(repo) { REPOS[repo]&.library || "??" }
+    puts "\nC++ source files:"
+    total = 0
+    sources.sort_by { |_, files| -files.size }.each do |repo, files|
+      puts format("  %-24s %4d  -> %s", repo, files.size, destination.call(repo))
+      total += files.size
+    end
+    generated.sort.each do |repo, files|
+      puts format("  %-24s %4d  -> %s", "#{repo} (generated)", files.size, destination.call(repo))
+      total += files.size
+    end
+    puts format("  %-24s %4d", "TOTAL", total)
+
+    sync_submodules(versions, config)
+
+    puts "\nwriting generated sources and filelists"
+    vendor(work, sources, generated)
+
+    puts "\nresolved module versions:"
+    versions.sort.each do |name, info|
+      next unless %w[abseil-cpp protobuf re2 antlr4-cpp-runtime cel-cpp cel-spec protovalidate].include?(name)
+
+      puts format("  %-22s %s", name, info.fetch("version"))
+    end
+
+    puts "\nnext: bundle exec rake compile, then rake spec conformance"
+  end
+end
+
+begin
+  ExtractNativeSources.main
+rescue ExtractNativeSources::ExtractionError => e
+  abort(e.message)
+end

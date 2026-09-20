@@ -1,0 +1,90 @@
+# Validates Protobuf messages against the buf.validate rules declared in their schema.
+module Protovalidate
+  VERSION: String
+
+  # Guards the lazy construction of the shared validator.
+  DEFAULT_VALIDATOR_LOCK: Mutex
+
+  # Version of the protovalidate specification this gem bundles.
+  PROTOVALIDATE_VERSION: String
+
+  # A Protobuf message instance produced by google-protobuf.
+  type message = Google::Protobuf::MessageExts
+
+  # The validator shared by the module-level functions.
+  def self.validator: () -> Validator
+
+  def self.validate: (message message, ?fail_fast: bool) -> void
+
+  def self.collect_violations: (message message, ?fail_fast: bool) -> Array[Violation]
+
+  class Error < StandardError
+  end
+
+  class CompilationError < Error
+  end
+
+  class EvaluationError < Error
+  end
+
+  class ValidationError < Error
+    attr_reader violations: Array[Violation]
+
+    def initialize: (String message, Array[Violation] violations) -> void
+
+    def to_proto: () -> Buf::Validate::Violations
+  end
+
+  class Validator
+    @descriptor_pool: Google::Protobuf::DescriptorPool
+    @engine: Native::Engine
+    @registered_files: Set[String]
+    @registered_types: Set[String]
+    @registration: Mutex
+
+    def initialize: (?descriptor_pool: Google::Protobuf::DescriptorPool) -> void
+
+    def validate: (message message, ?fail_fast: bool) -> void
+
+    def collect_violations: (message message, ?fail_fast: bool) -> Array[Violation]
+
+    private def descriptor_of: (message message) -> Google::Protobuf::Descriptor
+
+    private def register: (Google::Protobuf::Descriptor descriptor) -> void
+
+    private def register_file: (Google::Protobuf::FileDescriptor file) -> void
+  end
+
+  class Violation
+    # Marker for a path element without a subscript.
+    NO_SUBSCRIPT: Object
+
+    @source: message?
+
+    attr_reader proto: Buf::Validate::Violation
+
+    def initialize: (Buf::Validate::Violation proto, ?message? source) -> void
+
+    def rule_id: () -> String
+
+    def message: () -> String
+
+    def for_key?: () -> bool
+
+    def field: () -> Buf::Validate::FieldPath?
+
+    def rule: () -> Buf::Validate::FieldPath?
+
+    def field_path: () -> String
+
+    def field_value: () -> untyped
+
+    def to_s: () -> String
+
+    def inspect: () -> String
+
+    private def subscript_of: (Buf::Validate::FieldPathElement element) -> untyped
+
+    private def render_element: (Buf::Validate::FieldPathElement element) -> String
+  end
+end

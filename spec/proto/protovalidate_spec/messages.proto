@@ -1,0 +1,63 @@
+syntax = "proto3";
+
+package protovalidate_spec;
+
+import "buf/validate/validate.proto";
+import "google/protobuf/timestamp.proto";
+import "protovalidate_spec/rules.proto";
+
+message Address {
+  string city = 1 [(buf.validate.field).string.min_len = 1];
+}
+
+message User {
+  option (buf.validate.message).cel = {
+    id: "user.name_not_admin"
+    message: "name must not be admin"
+    expression: "this.name != 'admin'"
+  };
+
+  string name = 1 [(buf.validate.field).string = {
+    min_len: 1
+    max_len: 20
+  }];
+  string email = 2 [(buf.validate.field).string.email = true];
+  int32 age = 3 [(buf.validate.field).int32 = {
+    gte: 0
+    lte: 150
+  }];
+  repeated string tags = 4 [(buf.validate.field).repeated = {
+    unique: true
+    items: {
+      string: {min_len: 1}
+    }
+  }];
+  map<string, int32> scores = 5 [(buf.validate.field).map = {
+    keys: {
+      string: {min_len: 1}
+    }
+    values: {
+      int32: {gte: 0}
+    }
+  }];
+  Address address = 6;
+  google.protobuf.Timestamp created_at = 7 [(buf.validate.field).timestamp.lt_now = true];
+  int32 even = 8 [(buf.validate.field).int32.(protovalidate_spec.even) = true];
+}
+
+// The CEL expression references a function that does not exist, so compiling
+// the rules of this message fails.
+message BadRule {
+  string value = 1 [(buf.validate.field).cel = {
+    id: "bad_rule"
+    expression: "this.no_such_function()"
+  }];
+}
+
+// The CEL expression fails while being evaluated.
+message RuntimeFailure {
+  int32 divisor = 1 [(buf.validate.field).cel = {
+    id: "runtime_failure"
+    expression: "1 / this == 1"
+  }];
+}

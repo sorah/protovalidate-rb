@@ -1,0 +1,113 @@
+# Signatures for the parts of google-protobuf this gem uses. The signatures in
+# ruby/gem_rbs_collection describe the 3.x API and lack the descriptor methods
+# below, so rbs_collection.yaml ignores that gem in favour of this stub.
+module Google
+  module Protobuf
+    class DescriptorPool
+      def self.generated_pool: () -> DescriptorPool
+
+      def initialize: () -> void
+
+      def add_serialized_file: (String descriptor_data) -> FileDescriptor
+
+      def lookup: (String name) -> (Descriptor | EnumDescriptor | FieldDescriptor | FileDescriptor | ServiceDescriptor)?
+    end
+
+    class FileDescriptor
+      def name: () -> String
+
+      def to_proto: () -> FileDescriptorProto
+    end
+
+    class Descriptor
+      include Enumerable[FieldDescriptor]
+
+      def name: () -> String
+
+      def file_descriptor: () -> FileDescriptor
+
+      def each: () { (FieldDescriptor) -> void } -> void
+
+      def lookup: (String name) -> FieldDescriptor?
+
+      def msgclass: () -> singleton(MessageExts)
+
+      def to_proto: () -> DescriptorProto
+    end
+
+    class EnumDescriptor
+      def name: () -> String
+    end
+
+    class ServiceDescriptor
+      def name: () -> String
+    end
+
+    class FieldDescriptor
+      def name: () -> String
+
+      def number: () -> Integer
+
+      def type: () -> Symbol
+
+      def label: () -> Symbol
+
+      def subtype: () -> (Descriptor | EnumDescriptor)?
+    end
+
+    # Included in every generated message class.
+    module MessageExts
+      # Generated classes extend ClassMethods; declaring it on `class` lets a
+      # value typed as MessageExts reach descriptor/encode/decode.
+      def class: () -> (singleton(MessageExts) & ClassMethods)
+
+      def []: (String field) -> untyped
+
+      def []=: (String field, untyped value) -> void
+
+      module ClassMethods
+        def descriptor: () -> Descriptor
+
+        def encode: (MessageExts message, ?Hash[Symbol, untyped] options) -> String
+
+        def decode: (String data, ?Hash[Symbol, untyped] options) -> instance
+      end
+    end
+
+    class RepeatedField[Element]
+      include Enumerable[Element]
+
+      def each: () { (Element) -> void } -> void
+
+      def []: (Integer index) -> Element?
+
+      def size: () -> Integer
+
+      def to_a: () -> Array[Element]
+    end
+
+    class Map[Key, Value]
+      include Enumerable[[Key, Value]]
+
+      def each: () { ([Key, Value]) -> void } -> void
+
+      def []: (Key key) -> Value?
+    end
+
+    class FileDescriptorProto
+      include MessageExts
+      extend MessageExts::ClassMethods
+
+      def name: () -> String
+
+      def dependency: () -> RepeatedField[String]
+    end
+
+    class DescriptorProto
+      include MessageExts
+      extend MessageExts::ClassMethods
+
+      def name: () -> String
+    end
+  end
+end

@@ -1,0 +1,64 @@
+# Generated message classes of buf/validate/validate.proto that this gem exposes.
+# Only the members used by the gem's public API are declared.
+module Buf
+  module Validate
+    class Violations
+      include Google::Protobuf::MessageExts
+      extend Google::Protobuf::MessageExts::ClassMethods
+
+      def initialize: (?violations: Array[Violation]) -> void
+
+      def violations: () -> Google::Protobuf::RepeatedField[Violation]
+    end
+
+    class Violation
+      include Google::Protobuf::MessageExts
+      extend Google::Protobuf::MessageExts::ClassMethods
+
+      def field: () -> FieldPath?
+
+      def rule: () -> FieldPath?
+
+      def rule_id: () -> String
+
+      def message: () -> String
+
+      def for_key: () -> bool
+    end
+
+    class FieldPath
+      include Google::Protobuf::MessageExts
+      extend Google::Protobuf::MessageExts::ClassMethods
+
+      def elements: () -> Google::Protobuf::RepeatedField[FieldPathElement]
+    end
+
+    class FieldPathElement
+      include Google::Protobuf::MessageExts
+      extend Google::Protobuf::MessageExts::ClassMethods
+
+      def field_number: () -> Integer
+
+      def field_name: () -> String
+
+      def field_type: () -> Symbol
+
+      def key_type: () -> Symbol
+
+      def value_type: () -> Symbol
+
+      # Name of the populated subscript field, or nil.
+      def subscript: () -> (:index | :bool_key | :int_key | :uint_key | :string_key)?
+
+      def index: () -> Integer
+
+      def bool_key: () -> bool
+
+      def int_key: () -> Integer
+
+      def uint_key: () -> Integer
+
+      def string_key: () -> String
+    end
+  end
+end

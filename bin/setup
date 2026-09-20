@@ -3,6 +3,11 @@ set -euo pipefail
 IFS=$'\n\t'
 set -vx
 
-bundle install
+cd "$(dirname "$0")/.."
 
-# Do any other automated setup that you need to do here
+git submodule update --init --recursive --depth 1
+bundle install
+bundle exec rbs collection install
+if command -v hk >/dev/null 2>&1; then
+  hk install
+fi

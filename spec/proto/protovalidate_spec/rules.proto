@@ -1,0 +1,15 @@
+syntax = "proto2";
+
+package protovalidate_spec;
+
+import "buf/validate/validate.proto";
+
+// Predefined rules live in a proto2 file because proto3 cannot declare
+// extensions.
+extend buf.validate.Int32Rules {
+  optional bool even = 51000 [(buf.validate.predefined).cel = {
+    id: "int32.even"
+    message: "must be even"
+    expression: "this % 2 == 0"
+  }];
+}

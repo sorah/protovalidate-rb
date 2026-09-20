@@ -1,0 +1,39 @@
+# Signatures for third-party gems, fetched from ruby/gem_rbs_collection.
+# Run `bundle exec rbs collection install` after changing this file.
+sources:
+  - type: git
+    name: ruby/gem_rbs_collection
+    remote: https://github.com/ruby/gem_rbs_collection.git
+    revision: main
+    repo_dir: gems
+
+path: .gem_rbs_collection
+
+gems:
+  # The collection's google-protobuf signatures describe the 3.x API and miss
+  # the descriptor methods this gem depends on; sig-stub/google-protobuf.rbs
+  # declares the subset in use instead.
+  - name: google-protobuf
+    ignore: true
+  - name: rb_sys
+    ignore: true
+  - name: rake-compiler
+    ignore: true
+  - name: rbs
+    ignore: true
+  - name: steep
+    ignore: true
+  - name: rspec-core
+    ignore: true
+  - name: rspec-expectations
+    ignore: true
+  - name: rspec-mocks
+    ignore: true
+  - name: rspec-support
+    ignore: true
+  - name: rubocop
+    ignore: true
+  - name: rubocop-shopify
+    ignore: true
+  - name: yard
+    ignore: true

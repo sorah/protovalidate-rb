@@ -1,0 +1,15 @@
+{
+  "_comment": [
+    "Pins the protovalidate-cc release the native extension is built from.",
+    "Edit and run script/extract-native-sources to move the submodules, file lists and gen/."
+  ],
+  "protovalidate_cc": {
+    "archive": "https://github.com/bufbuild/protovalidate-cc/archive/{ref}.tar.gz",
+    "ref": "v1.2.0",
+    "sha256": "975146a7567167677b05da3eaf7271be8c11a89e1389e490cf7c403b56980e86"
+  },
+  "module_overrides": {},
+  "bazel": {
+    "java_runtime_version": "remotejdk_17"
+  }
+}

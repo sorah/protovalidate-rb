@@ -1,0 +1,148 @@
+name: Test
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  spec:
+    name: "Ruby ${{ matrix.ruby }} (${{ matrix.os }})"
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04]
+        ruby: ['3.3', '3.4', '4.0']
+        include:
+          - os: macos-15
+            ruby: '4.0'
+    env:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - uses: ruby/setup-ruby@a0102e0972be65f351c307e2d64b9314a57c8073 # v1.324.0
+        with:
+          ruby-version: ${{ matrix.ruby }}
+          bundler-cache: true
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
+        with:
+          toolchain: stable
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+      # The cc crate only routes C++ compiles through RUSTC_WRAPPER when the
+      # compiler is named explicitly.
+      - name: Name the C++ compiler for sccache
+        run: |
+          if [ "$RUNNER_OS" = macOS ]; then
+            printf 'CC=clang\nCXX=clang++\n' >> "$GITHUB_ENV"
+          else
+            printf 'CC=gcc\nCXX=g++\n' >> "$GITHUB_ENV"
+          fi
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          cache: false
+      - run: bundle exec rake compile
+      - run: bundle exec rake spec
+      - run: bundle exec rake conformance
+
+  # Installs the source gem the way a user without a precompiled gem would,
+  # which also checks that the gem ships every vendored header.
+  source-gem:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+      CC: gcc
+      CXX: g++
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - uses: ruby/setup-ruby@a0102e0972be65f351c307e2d64b9314a57c8073 # v1.324.0
+        with:
+          ruby-version: '4.0'
+          bundler-cache: true
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
+        with:
+          toolchain: stable
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+      - run: gem build protovalidate.gemspec --output tmp/protovalidate.gem
+      - run: gem install --no-document tmp/protovalidate.gem
+      - name: Smoke test the installed gem
+        run: |
+          ruby -e '
+            require "protovalidate"
+            require "protovalidate_spec/messages_pb"
+            violations = Protovalidate.collect_violations(ProtovalidateSpec::User.new(name: "", email: "x"))
+            puts violations
+            abort "expected violations" if violations.size != 2
+          ' -I spec/gen
+
+  steep:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: ruby/setup-ruby@a0102e0972be65f351c307e2d64b9314a57c8073 # v1.324.0
+        with:
+          ruby-version: '4.0'
+          bundler-cache: true
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: .gem_rbs_collection
+          key: rbs-collection-${{ hashFiles('rbs_collection.lock.yaml') }}
+          restore-keys: rbs-collection-
+      - run: bundle exec rbs collection install
+      - run: bundle exec steep check
+
+  lint:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: ruby/setup-ruby@a0102e0972be65f351c307e2d64b9314a57c8073 # v1.324.0
+        with:
+          ruby-version: '4.0'
+          bundler-cache: true
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
+        with:
+          toolchain: stable
+          components: clippy, rustfmt
+      - uses: bufbuild/buf-action@8c6a16e16f12ba20b6470afa9c2ba9b5ba8c97c3 # v1.5.0
+        with:
+          setup_only: true
+      - run: bundle exec rubocop
+      - run: bundle exec rake yard:check
+      - run: cargo fmt --manifest-path ext/protovalidate/Cargo.toml --check
+      # Lints the Rust sources without compiling the vendored C++.
+      - run: cargo clippy --manifest-path ext/protovalidate/Cargo.toml --all-targets -- -D warnings
+        env:
+          PROTOVALIDATE_SKIP_CPP: "1"
+      - name: Check generated code is current
+        run: |
+          bundle exec rake proto:generate
+          git diff --exit-code
+      - uses: zizmorcore/zizmor-action@cc914d7f3750a2d13d75c7f184a1060aa0e9d482 # v0.6.4
+        with:
+          advanced-security: false

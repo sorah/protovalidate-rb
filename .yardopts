@@ -1,0 +1,8 @@
+--markup markdown
+--no-private
+--exclude ^lib/buf/
+lib/**/*.rb
+-
+README.md
+NOTICE.md
+LICENSE.txt

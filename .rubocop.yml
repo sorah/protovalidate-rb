@@ -1,0 +1,65 @@
+inherit_gem:
+  rubocop-shopify: rubocop.yml
+
+AllCops:
+  TargetRubyVersion: 3.3
+  SuggestExtensions: false
+  Exclude:
+    - 'lib/buf/**/*_pb.rb'
+    - 'spec/gen/**/*'
+    - 'ext/protovalidate/sys/third_party/**/*'
+    - 'ext/protovalidate/target/**/*'
+    - 'tmp/**/*'
+    - 'pkg/**/*'
+    - 'vendor/**/*'
+    - '.gem_rbs_collection/**/*'
+
+Style/StringLiterals:
+  Enabled: false
+
+Style/SymbolArray:
+  Enabled: false
+
+Style/WordArray:
+  Enabled: false
+
+Style/MethodCallWithArgsParentheses:
+  Enabled: false
+
+Layout/MultilineMethodArgumentLineBreaks:
+  Enabled: false
+
+Layout/SpaceInsideHashLiteralBraces:
+  EnforcedStyle: no_space
+
+Style/ClassMethodsDefinitions:
+  Enabled: false
+
+Style/SingleLineMethods:
+  Enabled: false
+
+Style/InvertibleUnlessCondition:
+  InverseMethods:
+    # disable rubocop-rails rules depending on ActiveSupport methods
+    :include?: ~
+    :exclude?: ~
+
+Style/AccessModifierDeclarations:
+  Enabled: true
+  EnforcedStyle: inline
+
+Style/SpecialGlobalVars:
+  Enabled: false
+
+Style/CaseLikeIf:
+  Enabled: true
+  MinBranchesCount: 2
+
+Style/EmptyCaseCondition:
+  Enabled: false
+
+Lint/NoReturnInBeginEndBlocks:
+  Enabled: false
+
+Layout/EndAlignment:
+  EnforcedStyleAlignWith: start_of_line

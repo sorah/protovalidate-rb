@@ -1,0 +1,6 @@
+# Generates lib/buf/validate/validate_pb.rb from buf.build/bufbuild/protovalidate.
+# Run `bundle exec rake proto:generate`.
+version: v2
+plugins:
+  - remote: buf.build/protocolbuffers/ruby:v35.1
+    out: lib

@@ -1,0 +1,27 @@
+[package]
+name = "protovalidate_native"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Ruby native extension for the protovalidate gem"
+license = "Apache-2.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+magnus = "0.8"
+rb-sys = { version = "0.9.130", default-features = false, features = ["stable-api-compiled-fallback"] }
+protovalidate-cc-sys = { path = "sys" }
+
+[build-dependencies]
+rb-sys-env = "0.2"
+
+[workspace]
+members = ["sys"]
+
+[profile.release]
+debug = 0
+strip = true
+lto = true
+codegen-units = 1
