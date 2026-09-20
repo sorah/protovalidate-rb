@@ -12,12 +12,12 @@ jobs:
   test:
     permissions:
       contents: read
-    uses: ./.github/workflows/_test.yml
+    uses: ./.github/workflows/_test.yml # zizmor: ignore[self-repository]
 
   native:
     permissions:
       contents: read
-    uses: ./.github/workflows/native.yml
+    uses: ./.github/workflows/native.yml # zizmor: ignore[self-repository]
 
   release:
     needs: [test, native]

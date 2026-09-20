@@ -80,7 +80,7 @@ jobs:
           toolchain: stable
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
       - run: mkdir -p tmp && gem build protovalidate.gemspec --output tmp/protovalidate.gem
-      - run: gem install --no-document tmp/protovalidate.gem
+      - run: gem install --no-document tmp/protovalidate.gem # zizmor: ignore[adhoc-packages]
       - name: Smoke test the installed gem
         run: |
           ruby -e '

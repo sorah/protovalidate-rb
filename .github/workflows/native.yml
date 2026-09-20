@@ -28,12 +28,15 @@ jobs:
           # Linux gems loadable on glibc 2.28 and newer.
           - platform: x86_64-linux-gnu
             runner: ubuntu-24.04
-            container: quay.io/pypa/manylinux_2_28_x86_64
+            image_tag: 2026.09.14-1
+            container: quay.io/pypa/manylinux_2_28_x86_64:2026.09.14-1@sha256:531d7aa844bbb0c131d4ab011d3db741c4abc8d498cd5ccc86121046f62303b4
           - platform: aarch64-linux-gnu
             runner: ubuntu-24.04-arm
-            container: quay.io/pypa/manylinux_2_28_aarch64
+            image_tag: 2026.09.14-1
+            container: quay.io/pypa/manylinux_2_28_aarch64:2026.09.14-1@sha256:bbb43f784ce78a454a9e3351b862a12e7ad5c30972e8aeba092da678918bbba9
           - platform: arm64-darwin
             runner: macos-15
+            image_tag: ''
             container: ''
     env:
       RUSTC_WRAPPER: sccache
@@ -62,7 +65,7 @@ jobs:
         uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: /opt/rubies/${{ matrix.ruby }}
-          key: ruby-${{ matrix.platform }}-${{ matrix.ruby }}-${{ env.RUBY_BUILD_TAG }}
+          key: ruby-${{ matrix.platform }}-${{ matrix.ruby }}-${{ matrix.image_tag }}-${{ env.RUBY_BUILD_TAG }}
       - name: Build Ruby
         if: runner.os == 'Linux' && steps.ruby-cache.outputs.cache-hit != 'true'
         run: |
@@ -158,7 +161,7 @@ jobs:
           find lib/protovalidate -name 'protovalidate_native.*'
       - run: bundle exec rake "gem:native[${{ matrix.platform }}]"
       - name: Smoke test the gem
-        run: |
+        run: | # zizmor: ignore[adhoc-packages]
           gem install --no-document pkg/protovalidate-*.gem
           ruby -e '
             require "protovalidate"
