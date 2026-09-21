@@ -83,12 +83,12 @@ The rules of a message type are compiled the first time a message of that type i
 Protovalidate.register(Example::User, Example::Order)
 ```
 
-`Protovalidate.register_all` registers every message class loaded so far instead of a hand-maintained list, so call it once all generated code has been loaded. In a Rails application, `config.after_initialize` callbacks run in the `finisher_hook` initializer, after the `eager_load!` initializer, so with `config.eager_load` enabled every generated class under an autoload path is already loaded by then. Generated code outside the autoload paths, such as under `lib/`, must be required before the callback runs.
+`Protovalidate.register_all` registers every message class loaded so far instead of a hand-maintained list, so call it once all generated code has been loaded. In a Rails application, `config.after_initialize` callbacks run in the `finisher_hook` initializer, after the `eager_load!` initializer, so with `config.eager_load` enabled every generated class under an autoload path is already loaded by then. Without eager loading, only the classes loaded so far are registered and the rest compile on first use. Generated code outside the autoload paths, such as under `lib/`, must be required before the callback runs.
 
 ```ruby
 # config/initializers/protovalidate.rb
 Rails.application.config.after_initialize do
-  Protovalidate.register_all if Rails.application.config.eager_load
+  Protovalidate.register_all
 end
 ```
 
