@@ -11,6 +11,7 @@ env:
   RUBY_BUILD_TAG: v20260917
 
 jobs:
+  # Platforms with a runner of their own build natively, once per Ruby.
   build:
     name: "${{ matrix.platform }} / Ruby ${{ matrix.ruby }}"
     runs-on: ${{ matrix.runner }}
@@ -18,10 +19,13 @@ jobs:
     timeout-minutes: 120
     permissions:
       contents: read
+    defaults:
+      run:
+        shell: bash
     strategy:
       fail-fast: false
       matrix:
-        platform: [x86_64-linux-gnu, aarch64-linux-gnu, arm64-darwin]
+        platform: [x86_64-linux-gnu, aarch64-linux-gnu, arm64-darwin, x64-mingw-ucrt]
         ruby: ['3.3.12', '3.4.10', '4.0.7']
         include:
           # manylinux_2_34 (AlmaLinux 9, glibc 2.34, GCC 14 toolset) keeps the
@@ -30,14 +34,25 @@ jobs:
             runner: ubuntu-24.04
             image_tag: manylinux_2_34-2026.09.14-1
             container: quay.io/pypa/manylinux_2_34_x86_64:2026.09.14-1@sha256:0b4acc5b3c4c797bb9a6286c4d15039962f61ee0c5426753afd5cbe45baebfc4
+            rust_toolchain: stable
           - platform: aarch64-linux-gnu
             runner: ubuntu-24.04-arm
             image_tag: manylinux_2_34-2026.09.14-1
             container: quay.io/pypa/manylinux_2_34_aarch64:2026.09.14-1@sha256:db1a485b015c1d9a6d7e2929367a69a6f772964be06cca8fe585f959a47ec0b7
+            rust_toolchain: stable
           - platform: arm64-darwin
             runner: macos-15
             image_tag: ''
             container: ''
+            rust_toolchain: stable
+          # RubyInstaller's Rubies are built by MinGW, so the extension is
+          # too: the Rust side with the windows-gnu toolchain, the C++ side
+          # with the MSYS2 GCC that setup-ruby provides.
+          - platform: x64-mingw-ucrt
+            runner: windows-2025
+            image_tag: ''
+            container: ''
+            rust_toolchain: stable-x86_64-pc-windows-gnu
     env:
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: "true"
@@ -81,17 +96,31 @@ jobs:
         env:
           RUBY_VERSION: ${{ matrix.ruby }}
       - uses: ruby/setup-ruby@a0102e0972be65f351c307e2d64b9314a57c8073 # v1.324.0
-        if: runner.os == 'macOS'
+        if: runner.os != 'Linux'
         with:
           ruby-version: ${{ matrix.ruby }}
           bundler-cache: false
       - name: Name the C++ compiler for sccache
         if: runner.os == 'macOS'
         run: printf 'CC=clang\nCXX=clang++\n' >> "$GITHUB_ENV"
+      # Following oxidize-rb/actions: bindgen runs against MSYS2's clang, and
+      # the preprocessor definitions skip intrinsics headers bindgen chokes on
+      # (rust-lang/rust-bindgen#2500).
+      - name: Set up the MSYS2 toolchain
+        if: runner.os == 'Windows'
+        # ridk is a batch script, which bash does not run.
+        shell: pwsh
+        run: |
+          ridk exec pacman -S --noconfirm --needed mingw-w64-ucrt-x86_64-clang
+          $ucrt = (ridk exec cygpath -m /ucrt64).Trim()
+          Add-Content $env:GITHUB_ENV "LIBCLANG_PATH=$ucrt/bin"
+          Add-Content $env:GITHUB_ENV "BINDGEN_EXTRA_CLANG_ARGS=--target=x86_64-pc-windows-gnu --sysroot=$ucrt -D__AVX512VLFP16INTRIN_H -D__AVX512FP16INTRIN_H"
+          Add-Content $env:GITHUB_ENV "CC=gcc"
+          Add-Content $env:GITHUB_ENV "CXX=g++"
 
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
         with:
-          toolchain: stable
+          toolchain: ${{ matrix.rust_toolchain }}
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
       - run: ruby -v && bundle install
       - run: bundle exec rake compile
@@ -113,20 +142,201 @@ jobs:
         run: |
           otool -l lib/protovalidate/protovalidate_native.bundle | grep -A4 LC_BUILD_VERSION
           otool -l lib/protovalidate/protovalidate_native.bundle | grep -A4 LC_BUILD_VERSION | grep -q 'minos 11.0'
+      - name: Check the extension imports no MinGW runtime DLLs
+        if: runner.os == 'Windows'
+        run: |
+          objdump -p lib/protovalidate/protovalidate_native.so | grep 'DLL Name' | tee /tmp/dlls
+          if grep -iE 'libstdc\+\+|libgcc|libwinpthread' /tmp/dlls; then
+            echo "the MinGW runtime is not on the PATH Ruby loads extensions from"
+            exit 1
+          fi
 
+      - name: Stage the extension under its Ruby minor
+        run: |
+          minor="${RUBY_VERSION%.*}"
+          mkdir -p "tmp/native-stage/$minor"
+          cp lib/protovalidate/protovalidate_native.* "tmp/native-stage/$minor/"
+        env:
+          RUBY_VERSION: ${{ matrix.ruby }}
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: native-${{ matrix.platform }}-${{ matrix.ruby }}
-          path: lib/protovalidate/protovalidate_native.*
+          path: tmp/native-stage/
+          if-no-files-found: error
+
+  # Platforms without a runner of their own are cross-compiled with
+  # rake-compiler inside rb-sys-dock images, which carry the target Rubies.
+  # The images' GCC 9 is older than abseil accepts, so each job swaps in a
+  # newer cross compiler under the names the images configure.
+  cross:
+    name: "${{ matrix.platform }} (cross)"
+    runs-on: ubuntu-24.04
+    container: ${{ matrix.container }}
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: x86_64-linux-musl
+            rcd_platform: x86_64-linux-musl
+            container: rbsys/x86_64-linux-musl:0.9.130@sha256:53eb461ff585213551cf348c30a4329b0da1db735347b67877bb92e97018f176
+            bootlin_arch: x86-64
+            bootlin_sha256: 78d3a4683d6ac47b5ee73bd5bce210b55eb93dff1b137c61298af97eb0d2b5a6
+            bootlin_tuple: x86_64-buildroot-linux-musl
+            tool_prefix: x86_64-unknown-linux-musl
+          - platform: aarch64-linux-musl
+            rcd_platform: aarch64-linux-musl
+            container: rbsys/aarch64-linux-musl:0.9.130@sha256:bc92a3ee6f7df825b61f684cf09360b93aeccd762dcf3a3f7669a3f1dcb7908c
+            bootlin_arch: aarch64
+            bootlin_sha256: b388c480a48e8e9f9b99e3d14e69219c4d61e5a2424a82faecb88a015b781a60
+            bootlin_tuple: aarch64-buildroot-linux-musl
+            tool_prefix: aarch64-linux-musl
+          # The image's Ubuntu 20.04 cross sysroot sets the glibc floor at 2.31.
+          - platform: arm-linux-gnu
+            rcd_platform: arm-linux-gnueabihf
+            container: rbsys/arm-linux:0.9.130@sha256:35f74b4e450d85b0e6b44b748ca5a00878297c7da81a65c7f5d968e0a003c509
+            tool_prefix: arm-linux-gnueabihf
+    env:
+      # The cross Rubies rb-sys-dock 0.9.130 ships for the minors we carry.
+      RUBY_CC_VERSION: 3.3.11:3.4.9:4.0.2
+      BOOTLIN_RELEASE: stable-2026.08-1
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      # Bootlin's compiler drivers locate their real binaries from argv[0],
+      # so the image's names become wrapper scripts rather than symlinks.
+      - name: Install the Bootlin musl toolchain
+        if: matrix.bootlin_arch
+        run: |
+          tarball="$BOOTLIN_ARCH--musl--$BOOTLIN_RELEASE.tar.xz"
+          curl -sSfLo "/tmp/$tarball" "https://toolchains.bootlin.com/downloads/releases/toolchains/$BOOTLIN_ARCH/tarballs/$tarball"
+          echo "$BOOTLIN_SHA256  /tmp/$tarball" | sha256sum -c -
+          mkdir -p /opt/x-tools
+          tar -xJf "/tmp/$tarball" -C /opt/x-tools
+          bin="/opt/x-tools/$BOOTLIN_ARCH--musl--$BOOTLIN_RELEASE/bin"
+          for tool in gcc g++ c++ cc cpp ar gcc-ar ranlib gcc-ranlib nm strip ld; do
+            old="$(command -v "$TOOL_PREFIX-$tool")" || continue
+            printf '#!/bin/sh\nexec %s "$@"\n' "$bin/$BOOTLIN_TUPLE-$tool" > "$old"
+            chmod +x "$old"
+          done
+          "$TOOL_PREFIX-g++" --version
+        env:
+          BOOTLIN_ARCH: ${{ matrix.bootlin_arch }}
+          BOOTLIN_SHA256: ${{ matrix.bootlin_sha256 }}
+          BOOTLIN_TUPLE: ${{ matrix.bootlin_tuple }}
+          TOOL_PREFIX: ${{ matrix.tool_prefix }}
+      # Ubuntu 20.04's GCC 10 cross compiler builds against the same sysroot.
+      - name: Install GCC 10
+        if: matrix.platform == 'arm-linux-gnu'
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends "g++-10-$TOOL_PREFIX"
+          for tool in gcc g++ cpp gcc-ar; do
+            ln -sf "$TOOL_PREFIX-$tool-10" "/usr/bin/$TOOL_PREFIX-$tool"
+          done
+          "$TOOL_PREFIX-g++" --version
+        env:
+          TOOL_PREFIX: ${{ matrix.tool_prefix }}
+
+      # rake-compiler reads ~/.rake-compiler/config.yml, and container jobs
+      # move HOME away from the image's /root.
+      - name: Point rake-compiler at the cross Rubies
+        run: |
+          mkdir -p ~/.rake-compiler
+          ln -sf /usr/local/rake-compiler/config.yml ~/.rake-compiler/config.yml
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+      - run: ruby -v && bundle install
+      - run: bundle exec rake cross compile
+
+      - name: Check the extensions
+        run: |
+          set -o pipefail
+          for so in "tmp/$RCD_PLATFORM"/stage/lib/protovalidate/*/protovalidate_native.so; do
+            echo "== $so"
+            readelf -d "$so" | grep NEEDED
+            case "$PLATFORM" in
+              *-musl)
+                # libstdc++ is linked in; see link_libstdcxx_statically in sys/build.rs.
+                if readelf -d "$so" | grep -q 'libstdc++'; then echo "libstdc++ must be linked statically"; exit 1; fi
+                ;;
+              arm-linux-gnu)
+                newest="$(objdump -T "$so" | grep -oE 'GLIBC_[0-9.]+' | sed 's/GLIBC_//' | sort -uV | tail -1)"
+                echo "GLIBC: $newest (ceiling 2.31)"
+                [ "$(printf '%s\n2.31\n' "$newest" | sort -V | tail -1)" = 2.31 ] || { echo "GLIBC symbol newer than 2.31"; exit 1; }
+                ;;
+            esac
+          done
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          RCD_PLATFORM: ${{ matrix.rcd_platform }}
+
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: native-${{ matrix.platform }}-cross
+          path: tmp/${{ matrix.rcd_platform }}/stage/lib/protovalidate/
           if-no-files-found: error
 
   package:
     name: "gem ${{ matrix.platform }}"
-    needs: build
-    runs-on: ${{ matrix.runner }}
+    needs: [build, cross]
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - x86_64-linux-gnu
+          - aarch64-linux-gnu
+          - arm64-darwin
+          - x64-mingw-ucrt
+          - x86_64-linux-musl
+          - aarch64-linux-musl
+          - arm-linux-gnu
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - uses: ruby/setup-ruby@a0102e0972be65f351c307e2d64b9314a57c8073 # v1.324.0
+        with:
+          ruby-version: '4.0'
+          bundler-cache: true
+      # Every artifact holds <X.Y>/protovalidate_native.<ext>.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: native-${{ matrix.platform }}-*
+          path: lib/protovalidate
+          merge-multiple: true
+      - run: find lib/protovalidate -name 'protovalidate_native.*'
+      - run: bundle exec rake "gem:native[${{ matrix.platform }}]"
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: gem-${{ matrix.platform }}
+          path: pkg/*.gem
+          if-no-files-found: error
+
+  smoke:
+    name: "smoke ${{ matrix.platform }}"
+    needs: package
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
     strategy:
       fail-fast: false
       matrix:
@@ -137,41 +347,47 @@ jobs:
             runner: ubuntu-24.04-arm
           - platform: arm64-darwin
             runner: macos-15
+          - platform: x64-mingw-ucrt
+            runner: windows-2025
+          # Platforms without a runner of their own run the gem in a stock
+          # Ruby image, under QEMU where the architecture differs.
+          - platform: x86_64-linux-musl
+            runner: ubuntu-24.04
+            image: ruby:4.0-alpine@sha256:6c6496014180c3c01b1a8cda242e888ee5a8591b8b8f7682b90cc2e32bfd31b6
+          - platform: aarch64-linux-musl
+            runner: ubuntu-24.04-arm
+            image: ruby:4.0-alpine@sha256:6c6496014180c3c01b1a8cda242e888ee5a8591b8b8f7682b90cc2e32bfd31b6
+          # google-protobuf ships no arm-linux gem, so it compiles from source
+          # here; the Debian image has the toolchain for that.
+          - platform: arm-linux-gnu
+            runner: ubuntu-24.04
+            image: ruby:4.0-bookworm@sha256:119a36c51c7893215202220eabfdcb561638735de4d45bacf2e8619be3de47f2
+            docker_platform: linux/arm/v7
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
-          submodules: recursive
           persist-credentials: false
-      - uses: ruby/setup-ruby@a0102e0972be65f351c307e2d64b9314a57c8073 # v1.324.0
-        with:
-          ruby-version: '4.0'
-          bundler-cache: true
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          pattern: native-${{ matrix.platform }}-*
-          path: tmp/native
-      - name: Stage extensions per Ruby minor
-        run: |
-          for dir in tmp/native/native-*; do
-            version="${dir##*-}"
-            minor="${version%.*}"
-            mkdir -p "lib/protovalidate/$minor"
-            cp "$dir"/protovalidate_native.* "lib/protovalidate/$minor/"
-          done
-          find lib/protovalidate -name 'protovalidate_native.*'
-      - run: bundle exec rake "gem:native[${{ matrix.platform }}]"
-      - name: Smoke test the gem
-        run: | # zizmor: ignore[adhoc-packages]
-          gem install --no-document pkg/protovalidate-*.gem
-          ruby -e '
-            require "protovalidate"
-            require "protovalidate_spec/messages_pb"
-            violations = Protovalidate.collect_violations(ProtovalidateSpec::User.new(name: "", email: "x"))
-            puts violations
-            abort "expected violations" if violations.size != 2
-          ' -I spec/gen
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
-        with:
           name: gem-${{ matrix.platform }}
-          path: pkg/*.gem
-          if-no-files-found: error
+          path: pkg
+      - uses: ruby/setup-ruby@a0102e0972be65f351c307e2d64b9314a57c8073 # v1.324.0
+        if: '!matrix.image'
+        with:
+          ruby-version: '4.0'
+          bundler-cache: false
+      - name: Smoke test the gem
+        if: '!matrix.image'
+        run: ruby script/smoke-test-gem pkg/protovalidate-*.gem
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+        if: matrix.docker_platform
+        with:
+          image: tonistiigi/binfmt:latest@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
+      - name: Smoke test the gem in ${{ matrix.image }}
+        if: matrix.image
+        run: |
+          docker run --rm ${DOCKER_PLATFORM:+--platform "$DOCKER_PLATFORM"} -v "$PWD:/src:ro" -w /src "$IMAGE" \
+            sh -c 'ruby script/smoke-test-gem pkg/protovalidate-*.gem'
+        env:
+          IMAGE: ${{ matrix.image }}
+          DOCKER_PLATFORM: ${{ matrix.docker_platform }}

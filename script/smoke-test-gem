@@ -1,0 +1,23 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Installs a precompiled gem and validates a message through it. Run by
+# .github/workflows/native.yml on each platform a gem targets.
+
+gem_path = ARGV.fetch(0) { abort "usage: #{$PROGRAM_NAME} pkg/protovalidate-VERSION-PLATFORM.gem" }
+system("gem", "install", "--no-document", gem_path, exception: true)
+Gem::Specification.reset
+
+$LOAD_PATH.unshift(File.expand_path("../spec/gen", __dir__))
+require "protovalidate"
+require "protovalidate_spec/messages_pb"
+
+native = $LOADED_FEATURES.grep(/protovalidate_native/)
+puts native
+minor = RUBY_VERSION[/\A\d+\.\d+/]
+abort "expected the precompiled extension for Ruby #{minor}" unless native.any? { |path| path.include?("/#{minor}/") }
+
+violations = Protovalidate.collect_violations(ProtovalidateSpec::User.new(name: "", email: "x"))
+puts violations
+abort "expected 2 violations" if violations.size != 2
+puts RUBY_DESCRIPTION

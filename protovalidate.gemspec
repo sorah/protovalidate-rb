@@ -11,7 +11,7 @@ Gem::Specification.new do |spec|
   spec.summary = "Protobuf message validation with protovalidate (buf.validate) rules"
   spec.description = "Ruby implementation of protovalidate. Validates Protobuf messages against the " \
     "buf.validate rules in their schema, evaluated with CEL by protovalidate-cc through a native " \
-    "extension. Precompiled gems are published for Linux and macOS."
+    "extension. Precompiled gems are published for Linux, macOS and Windows."
   spec.homepage = "https://github.com/sorah/protovalidate-rb"
   spec.license = "Apache-2.0"
   spec.required_ruby_version = ">= 3.3.0"

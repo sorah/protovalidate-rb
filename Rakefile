@@ -14,6 +14,11 @@ Rake::ExtensionTask.new("protovalidate_native") do |ext|
   ext.ext_dir = "ext/protovalidate"
   ext.lib_dir = "lib/protovalidate"
   ext.source_pattern = "{Cargo.toml,Cargo.lock,build.rs,src/**/*.rs,sys/Cargo.toml,sys/build.rs,sys/src/**/*.rs,sys/shim/*,sys/filelists/*.txt}"
+  # Platforms without a native CI runner are cross-compiled inside rb-sys-dock
+  # images (see .github/workflows/native.yml). Given several RUBY_CC_VERSIONs,
+  # `rake cross compile` stages each under tmp/<platform>/stage/lib/protovalidate/<X.Y>/.
+  ext.cross_compile = true
+  ext.cross_platform = %w[x86_64-linux-musl aarch64-linux-musl arm-linux-gnueabihf]
 end
 
 RSpec::Core::RakeTask.new(:spec)

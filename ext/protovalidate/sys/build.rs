@@ -101,6 +101,41 @@ fn read_filelist(path: &Path) -> Vec<String> {
         .collect()
 }
 
+/// Whether the target is Windows with the GNU toolchain (RubyInstaller's).
+fn target_is_mingw() -> bool {
+    env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
+        && env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("gnu")
+}
+
+/// Whether libstdc++ is linked into the extension rather than loaded at
+/// runtime. musl distributions do not install libstdc++ by default, and on
+/// Windows the MinGW runtime DLLs are not on the PATH Ruby loads from.
+fn link_libstdcxx_statically() -> bool {
+    env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("musl") || target_is_mingw()
+}
+
+/// cel-cpp's typeinfo.cc takes `_WIN32` to mean MSVC and demangles with
+/// `type_info::raw_name`, which only MSVC has. MinGW gets a copy that tests
+/// `_MSC_VER` instead and so takes the Itanium ABI path GCC implements.
+fn patch_for_mingw(path: PathBuf) -> PathBuf {
+    if !target_is_mingw() || !path.ends_with("third_party/cel-cpp/common/typeinfo.cc") {
+        return path;
+    }
+    let source =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    assert_eq!(
+        source.matches("#ifdef _WIN32").count(),
+        2,
+        "{}: the _WIN32 guards moved; revisit patch_for_mingw",
+        path.display(),
+    );
+    let patched =
+        PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR")).join("cel_typeinfo_mingw.cc");
+    std::fs::write(&patched, source.replace("#ifdef _WIN32", "#ifdef _MSC_VER"))
+        .unwrap_or_else(|e| panic!("{}: {e}", patched.display()));
+    patched
+}
+
 /// One static library built from the C++ sources.
 struct CxxLib {
     name: String,
@@ -129,13 +164,16 @@ impl CxxLib {
             build.flag_if_supported("-fvisibility=hidden");
             build.flag_if_supported("-fvisibility-inlines-hidden");
         }
+        if link_libstdcxx_statically() {
+            build.cpp_link_stdlib_static(true);
+        }
         for dir in includes {
             build.include(dir);
         }
 
         let root = manifest_dir();
         for file in read_filelist(&root.join(format!("filelists/{name}.txt"))) {
-            build.file(root.join(file));
+            build.file(patch_for_mingw(root.join(file)));
         }
         Self {
             name: name.to_owned(),
@@ -211,6 +249,21 @@ fn main() {
     re2_lib.compile();
     antlr4_lib.compile();
     absl_lib.compile();
+
+    // rustc resolves the static libstdc++ itself, so it needs the compiler's
+    // library directory.
+    if link_libstdcxx_statically() {
+        let output = absl_lib
+            .build
+            .get_compiler()
+            .to_command()
+            .arg("-print-file-name=libstdc++.a")
+            .output()
+            .expect("run the C++ compiler");
+        let archive = PathBuf::from(String::from_utf8(output.stdout).expect("utf-8").trim());
+        let dir = archive.parent().expect("libstdc++.a directory");
+        println!("cargo::rustc-link-search=native={}", dir.display());
+    }
 
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
         println!("cargo::rustc-link-lib=framework=CoreFoundation");
