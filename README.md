@@ -14,7 +14,7 @@ Precompiled gems are published for:
 
 | Platform | Requirements |
 |---|---|
-| `x86_64-linux-gnu`, `aarch64-linux-gnu` | glibc 2.28 or newer |
+| `x86_64-linux-gnu`, `aarch64-linux-gnu` | glibc 2.34 or newer |
 | `arm64-darwin` | macOS 11 or newer |
 
 Each covers Ruby 3.3, 3.4 and 4.0. On other platforms or Ruby versions the source gem is built at install time, which needs a Rust toolchain (1.85+), a C++17 compiler and a few minutes: it compiles protovalidate-cc, cel-cpp, abseil, protobuf, re2 and the ANTLR runtime.
@@ -86,7 +86,7 @@ bundle exec rake steep yard:check rubocop
 
 The native code lives in `ext/protovalidate`: `src/lib.rs` binds `Protovalidate::Native::Engine` with [magnus](https://github.com/matsadler/magnus), and `sys/` compiles protovalidate-cc and its dependencies from git submodules using file lists derived from protovalidate-cc's Bazel build. To move to a new protovalidate-cc release, edit `ext/protovalidate/sys/versions.json`, run `script/extract-native-sources` (needs Bazel), update `PROTOVALIDATE_VERSION` in `lib/protovalidate/version.rb` if the specification version moved, and run `bundle exec rake proto:generate`.
 
-Precompiled gems are assembled by `.github/workflows/native.yml`: Linux builds run inside manylinux_2_28 containers, macOS builds on macos-15, and `rake 'gem:native[PLATFORM]'` packages one gem per platform.
+Precompiled gems are assembled by `.github/workflows/native.yml`: Linux builds run inside manylinux_2_34 containers, macOS builds on macos-15, and `rake 'gem:native[PLATFORM]'` packages one gem per platform.
 
 ## License
 
