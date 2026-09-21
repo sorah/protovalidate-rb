@@ -2,7 +2,7 @@
 
 module Protovalidate
   # Version of this gem.
-  VERSION = "0.1.0.beta2"
+  VERSION = "0.1.0.beta3"
 
   # Version of the protovalidate specification (buf.validate protos and
   # conformance suite) this gem bundles and is validated against.
