@@ -77,6 +77,14 @@ All inherit from `Protovalidate::Error` except `ArgumentError`.
 
 A `Validator` compiles the rules of each message type once and caches them, so reuse one instance. Validating from several threads at once is supported and releases the GVL while protovalidate-cc runs. Ractors are not supported.
 
+The rules of a message type are compiled the first time a message of that type is validated, and protovalidate-cc holds an exclusive lock while it compiles, so every concurrent validation on the same validator waits until the compilation finishes. To keep that off the request path, register the message types your application validates at boot, for example from a Rails initializer or before the server forks workers:
+
+```ruby
+Protovalidate.register(Example::User, Example::Order)
+```
+
+Types that were not registered still compile on first use, so registration is an optimization rather than a requirement. Once a type is registered, validating it takes no lock on the Ruby side, and the shared validator returned by `Protovalidate.validator` is created once and then read without locking.
+
 ## Development
 
 ```bash
