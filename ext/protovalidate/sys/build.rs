@@ -250,19 +250,28 @@ fn main() {
     antlr4_lib.compile();
     absl_lib.compile();
 
-    // rustc resolves the static libstdc++ itself, so it needs the compiler's
-    // library directory.
+    // rustc resolves the static archives itself, so it needs the compiler's
+    // library directories.
     if link_libstdcxx_statically() {
-        let output = absl_lib
-            .build
-            .get_compiler()
-            .to_command()
-            .arg("-print-file-name=libstdc++.a")
-            .output()
-            .expect("run the C++ compiler");
-        let archive = PathBuf::from(String::from_utf8(output.stdout).expect("utf-8").trim());
-        let dir = archive.parent().expect("libstdc++.a directory");
-        println!("cargo::rustc-link-search=native={}", dir.display());
+        let mut archives = vec!["libstdc++.a"];
+        // MinGW's libstdc++ implements threads on winpthreads, whose DLL is
+        // no more on Ruby's PATH than libstdc++'s.
+        if target_is_mingw() {
+            println!("cargo::rustc-link-lib=static=winpthread");
+            archives.push("libwinpthread.a");
+        }
+        for archive in archives {
+            let output = absl_lib
+                .build
+                .get_compiler()
+                .to_command()
+                .arg(format!("-print-file-name={archive}"))
+                .output()
+                .expect("run the C++ compiler");
+            let path = PathBuf::from(String::from_utf8(output.stdout).expect("utf-8").trim());
+            let dir = path.parent().expect("archive directory");
+            println!("cargo::rustc-link-search=native={}", dir.display());
+        }
     }
 
     // abseil's sysinfo.cc reads the CPU frequency from the registry; bazel
