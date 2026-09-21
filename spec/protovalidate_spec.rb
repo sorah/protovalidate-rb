@@ -16,6 +16,22 @@ RSpec.describe Protovalidate do
     end
   end
 
+  describe ".register" do
+    it "registers with the shared validator" do
+      allow(Protovalidate.validator).to receive(:register).and_call_original
+      Protovalidate.register(ProtovalidateSpec::User, ProtovalidateSpec::Address)
+      expect(Protovalidate.validator).to have_received(:register).with(ProtovalidateSpec::User, ProtovalidateSpec::Address)
+    end
+  end
+
+  describe ".register_all" do
+    it "registers with the shared validator" do
+      allow(Protovalidate.validator).to receive(:register_all)
+      Protovalidate.register_all
+      expect(Protovalidate.validator).to have_received(:register_all)
+    end
+  end
+
   describe ".validate" do
     it "returns nil for a valid message" do
       expect(Protovalidate.validate(valid_user)).to be_nil

@@ -6,8 +6,8 @@
 use magnus::Module as _;
 use magnus::Object as _;
 
-/// The engine, shared between Ruby threads. `validate` takes the read lock and
-/// `add_file` the write lock, matching the shim's thread-safety contract.
+/// The engine, shared between Ruby threads. `validate` and `message_type?`
+/// take the read lock; `add_file` and `compile` take the write lock.
 #[magnus::wrap(class = "Protovalidate::Native::Engine", free_immediately)]
 struct Engine {
     inner: std::sync::RwLock<protovalidate_cc_sys::Engine>,
@@ -37,6 +37,37 @@ impl Engine {
         engine
             .add_file(&bytes)
             .map_err(|error| crate::to_ruby_error(ruby, error))
+    }
+
+    /// Whether the engine knows the named message type.
+    fn message_type(rb_self: &Self, type_name: String) -> bool {
+        let engine = rb_self
+            .inner
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        engine.has_message_type(&type_name)
+    }
+
+    /// Compiles the rules of the named type ahead of its first validation.
+    ///
+    /// Compilation inserts into the factory's `flat_hash_map` of rules, and a
+    /// rehash there moves every entry. A concurrent `Validate` holds a pointer
+    /// into that map after releasing the factory's reader lock, so compiling
+    /// under the shared read lock could leave it reading freed memory. The
+    /// write lock keeps validations out until the insert is done.
+    fn compile(
+        ruby: &magnus::Ruby,
+        rb_self: &Self,
+        type_name: String,
+    ) -> Result<(), magnus::Error> {
+        let result = crate::gvl::without_gvl(|| {
+            let engine = rb_self
+                .inner
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            engine.compile(&type_name)
+        });
+        result.map_err(|error| crate::to_ruby_error(ruby, error))
     }
 
     /// Validates a serialized message of the named type, returning serialized
@@ -156,6 +187,8 @@ fn init(ruby: &magnus::Ruby) -> Result<(), magnus::Error> {
     let class = module.define_class("Engine", ruby.class_object())?;
     class.define_singleton_method("new", magnus::function!(Engine::new, 0))?;
     class.define_method("add_file", magnus::method!(Engine::add_file, 1))?;
+    class.define_method("message_type?", magnus::method!(Engine::message_type, 1))?;
+    class.define_method("compile", magnus::method!(Engine::compile, 1))?;
     class.define_method("validate", magnus::method!(Engine::validate, 3))?;
     Ok(())
 }

@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- `Protovalidate.register` and `Validator#register` compile the rules of message types ahead of their first validation, so the compilation, which blocks concurrent validations, can run at boot instead of inside a request. `register_all` does the same for every loaded message class.
+- Validating an already seen message type no longer takes a lock or allocates its type name on the Ruby side.
+
 ## 0.1.0.beta2 (2026-09-21)
 
 - Precompiled gems for `x86_64-linux-musl`, `aarch64-linux-musl`, `arm-linux-gnu` and `x64-mingw-ucrt`.
