@@ -83,7 +83,16 @@ The rules of a message type are compiled the first time a message of that type i
 Protovalidate.register(Example::User, Example::Order)
 ```
 
-Types that were not registered still compile on first use, so registration is an optimization rather than a requirement. Once a type is registered, validating it takes no lock on the Ruby side, and the shared validator returned by `Protovalidate.validator` is created once and then read without locking.
+`Protovalidate.register_all` registers every message class loaded so far instead of a hand-maintained list, so call it once all generated code has been loaded. In a Rails application, `config.after_initialize` callbacks run in the `finisher_hook` initializer, after the `eager_load!` initializer, so with `config.eager_load` enabled every generated class under an autoload path is already loaded by then. Generated code outside the autoload paths, such as under `lib/`, must be required before the callback runs.
+
+```ruby
+# config/initializers/protovalidate.rb
+Rails.application.config.after_initialize do
+  Protovalidate.register_all if Rails.application.config.eager_load
+end
+```
+
+Types that were not registered still compile on first use, so registration is an optimization rather than a requirement. Both methods raise `Protovalidate::CompilationError` for a rule that does not compile, so a bad rule fails at boot rather than on the first request that reaches it. `register_all` skips message types the engine cannot see, which happens when google-protobuf ships a newer copy of a file compiled into the extension, such as `google/protobuf/descriptor.proto`; those types cannot be validated either way. Once a type is registered, validating it takes no lock on the Ruby side, and the shared validator returned by `Protovalidate.validator` is created once and then read without locking.
 
 ## Development
 

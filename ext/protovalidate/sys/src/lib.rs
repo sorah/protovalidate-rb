@@ -28,6 +28,11 @@ unsafe extern "C" {
         len: usize,
         error: *mut *mut c_char,
     ) -> c_int;
+    fn pv_engine_has_message_type(
+        engine: *mut PvEngine,
+        type_name: *const c_char,
+        type_name_len: usize,
+    ) -> c_int;
     fn pv_engine_compile(
         engine: *mut PvEngine,
         type_name: *const c_char,
@@ -108,6 +113,14 @@ impl Engine {
             Ok(())
         } else {
             Err(unsafe { status_error(code, error) })
+        }
+    }
+
+    /// Whether the engine's pool knows the message type `type_name`.
+    pub fn has_message_type(&self, type_name: &str) -> bool {
+        unsafe {
+            pv_engine_has_message_type(self.0, type_name.as_ptr().cast::<c_char>(), type_name.len())
+                != 0
         }
     }
 

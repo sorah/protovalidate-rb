@@ -42,6 +42,15 @@ module Protovalidate
     validator.register(*message_classes)
   end
 
+  # Registers every loaded message class of the generated pool with the shared
+  # validator. Call it once all generated code has been loaded.
+  #
+  # @return [void]
+  # @raise (see Validator#register)
+  def self.register_all
+    validator.register_all
+  end
+
   # Collects the violations of a message with the shared validator.
   #
   # @param (see Validator#collect_violations)

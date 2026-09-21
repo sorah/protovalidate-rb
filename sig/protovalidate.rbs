@@ -21,6 +21,8 @@ module Protovalidate
 
   def self.register: (*message_class message_classes) -> void
 
+  def self.register_all: () -> void
+
   def self.collect_violations: (message message, ?fail_fast: bool) -> Array[Violation]
 
   class Error < StandardError
@@ -41,6 +43,9 @@ module Protovalidate
   end
 
   class Validator
+    # google-protobuf's private base class of generated messages, reached with const_get.
+    MESSAGE_BASE: untyped
+
     @descriptor_pool: Google::Protobuf::DescriptorPool
     @engine: Native::Engine
     @registered_files: Set[String]
@@ -52,13 +57,17 @@ module Protovalidate
 
     def register: (*message_class message_classes) -> void
 
+    def register_all: () -> void
+
     def validate: (message message, ?fail_fast: bool) -> void
 
     def collect_violations: (message message, ?fail_fast: bool) -> Array[Violation]
 
+    private def loaded_message_classes: () -> Array[message_class]
+
     private def type_name_of: (message_class klass) -> String
 
-    private def register_class: (message_class klass) -> String
+    private def register_class: (message_class klass, ?skip_unknown: bool) -> String?
 
     private def descriptor_of: (message_class klass) -> Google::Protobuf::Descriptor
 

@@ -6,6 +6,9 @@ module Protovalidate
       # Adds a serialized google.protobuf.FileDescriptorProto to the pool.
       def add_file: (String file) -> void
 
+      # Whether the engine's pool knows the named message type.
+      def message_type?: (String type_name) -> bool
+
       # Compiles the rules of the named type and of every type reachable from
       # it, ahead of the first validate.
       def compile: (String type_name) -> void

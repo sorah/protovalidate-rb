@@ -139,6 +139,51 @@ RSpec.describe Protovalidate::Validator do
     end
   end
 
+  describe "#register_all" do
+    let(:pool) do
+      Google::Protobuf::DescriptorPool.new.tap do |pool|
+        fdset = Google::Protobuf::FileDescriptorSet.decode(File.binread(File.expand_path("../fixtures/spec_messages.fdset", __dir__)))
+        fdset.file.each { |file| pool.add_serialized_file(Google::Protobuf::FileDescriptorProto.encode(file)) }
+      end
+    end
+
+    it "registers the loaded classes of its own pool and skips other pools" do
+      classes = %w[protovalidate_spec.User protovalidate_spec.Address].map { |name| pool.lookup(name).msgclass }
+      validator = described_class.new(descriptor_pool: pool)
+      engine = validator.instance_variable_get(:@engine)
+      allow(engine).to receive(:compile).and_call_original
+
+      validator.register_all
+
+      expect(engine).to have_received(:compile).with("protovalidate_spec.User").once
+      expect(engine).to have_received(:compile).with("protovalidate_spec.Address").once
+      expect(engine).to have_received(:compile).twice
+      expect(validator.collect_violations(classes.fetch(1).new(city: "")).map(&:rule_id)).to eq(["string.min_len"])
+    end
+
+    it "skips loaded types the engine does not know instead of raising" do
+      unknown = ProtovalidateSpec::User.superclass.subclasses.find do |klass|
+        described_class.new.register(klass)
+        false
+      rescue Protovalidate::CompilationError
+        false
+      rescue ArgumentError => e
+        e.message.include?("unknown message type")
+      end
+      expect(unknown).not_to be_nil
+
+      allow(validator).to receive(:loaded_message_classes).and_return([unknown, ProtovalidateSpec::User])
+      validator.register_all
+      expect(validator.collect_violations(valid_user(name: "")).map(&:rule_id)).to eq(["string.min_len"])
+      expect { validator.validate(unknown.new) }.to raise_error(ArgumentError, /unknown message type/)
+    end
+
+    it "raises CompilationError when a loaded message type has a rule that does not compile" do
+      expect(ProtovalidateSpec::BadRule.superclass.subclasses).to include(ProtovalidateSpec::BadRule)
+      expect { validator.register_all }.to raise_error(Protovalidate::CompilationError, /overload/i)
+    end
+  end
+
   describe "the registered fast path" do
     it "looks up the descriptor only once per message class" do
       allow(ProtovalidateSpec::User).to receive(:descriptor).and_call_original

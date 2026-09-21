@@ -6,8 +6,8 @@
 use magnus::Module as _;
 use magnus::Object as _;
 
-/// The engine, shared between Ruby threads. `validate` takes the read lock;
-/// `add_file` and `compile` take the write lock.
+/// The engine, shared between Ruby threads. `validate` and `message_type?`
+/// take the read lock; `add_file` and `compile` take the write lock.
 #[magnus::wrap(class = "Protovalidate::Native::Engine", free_immediately)]
 struct Engine {
     inner: std::sync::RwLock<protovalidate_cc_sys::Engine>,
@@ -37,6 +37,15 @@ impl Engine {
         engine
             .add_file(&bytes)
             .map_err(|error| crate::to_ruby_error(ruby, error))
+    }
+
+    /// Whether the engine knows the named message type.
+    fn message_type(rb_self: &Self, type_name: String) -> bool {
+        let engine = rb_self
+            .inner
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        engine.has_message_type(&type_name)
     }
 
     /// Compiles the rules of the named type ahead of its first validation.
@@ -178,6 +187,7 @@ fn init(ruby: &magnus::Ruby) -> Result<(), magnus::Error> {
     let class = module.define_class("Engine", ruby.class_object())?;
     class.define_singleton_method("new", magnus::function!(Engine::new, 0))?;
     class.define_method("add_file", magnus::method!(Engine::add_file, 1))?;
+    class.define_method("message_type?", magnus::method!(Engine::message_type, 1))?;
     class.define_method("compile", magnus::method!(Engine::compile, 1))?;
     class.define_method("validate", magnus::method!(Engine::validate, 3))?;
     Ok(())

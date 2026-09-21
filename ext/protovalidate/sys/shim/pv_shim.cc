@@ -229,6 +229,12 @@ int pv_engine_add_file(pv_engine* engine, const uint8_t* file_descriptor_proto,
   return PV_OK;
 }
 
+int pv_engine_has_message_type(pv_engine* engine, const char* type_name,
+                               size_t type_name_len) {
+  return engine->pool.FindMessageTypeByName(
+             absl::string_view(type_name, type_name_len)) != nullptr;
+}
+
 int pv_engine_compile(pv_engine* engine, const char* type_name,
                       size_t type_name_len, char** error) {
   const google::protobuf::Descriptor* descriptor =
