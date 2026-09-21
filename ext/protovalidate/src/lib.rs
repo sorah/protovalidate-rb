@@ -6,9 +6,8 @@
 use magnus::Module as _;
 use magnus::Object as _;
 
-/// The engine, shared between Ruby threads. `validate` and `compile` take the
-/// read lock and `add_file` the write lock, matching the shim's thread-safety
-/// contract.
+/// The engine, shared between Ruby threads. `validate` takes the read lock;
+/// `add_file` and `compile` take the write lock.
 #[magnus::wrap(class = "Protovalidate::Native::Engine", free_immediately)]
 struct Engine {
     inner: std::sync::RwLock<protovalidate_cc_sys::Engine>,
@@ -41,6 +40,12 @@ impl Engine {
     }
 
     /// Compiles the rules of the named type ahead of its first validation.
+    ///
+    /// Compilation inserts into the factory's `flat_hash_map` of rules, and a
+    /// rehash there moves every entry. A concurrent `Validate` holds a pointer
+    /// into that map after releasing the factory's reader lock, so compiling
+    /// under the shared read lock could leave it reading freed memory. The
+    /// write lock keeps validations out until the insert is done.
     fn compile(
         ruby: &magnus::Ruby,
         rb_self: &Self,
@@ -49,7 +54,7 @@ impl Engine {
         let result = crate::gvl::without_gvl(|| {
             let engine = rb_self
                 .inner
-                .read()
+                .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             engine.compile(&type_name)
         });
