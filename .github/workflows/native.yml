@@ -248,12 +248,6 @@ jobs:
         env:
           TOOL_PREFIX: ${{ matrix.tool_prefix }}
 
-      # rake-compiler reads ~/.rake-compiler/config.yml, and container jobs
-      # move HOME away from the image's /root.
-      - name: Point rake-compiler at the cross Rubies
-        run: |
-          mkdir -p ~/.rake-compiler
-          ln -sf /usr/local/rake-compiler/config.yml ~/.rake-compiler/config.yml
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
       - run: ruby -v && bundle install
       - run: bundle exec rake cross compile
