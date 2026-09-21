@@ -265,6 +265,12 @@ fn main() {
         println!("cargo::rustc-link-search=native={}", dir.display());
     }
 
+    // abseil's sysinfo.cc reads the CPU frequency from the registry; bazel
+    // links advapi32 through abseil's linkopts.
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        println!("cargo::rustc-link-lib=advapi32");
+    }
+
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
         println!("cargo::rustc-link-lib=framework=CoreFoundation");
     }
