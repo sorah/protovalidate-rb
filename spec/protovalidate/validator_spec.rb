@@ -111,6 +111,62 @@ RSpec.describe Protovalidate::Validator do
     end
   end
 
+  describe "#register" do
+    it "compiles ahead so the first validation finds the rules ready" do
+      engine = validator.instance_variable_get(:@engine)
+      allow(engine).to receive(:compile).and_call_original
+      validator.register(ProtovalidateSpec::User)
+      expect(engine).to have_received(:compile).with("protovalidate_spec.User").once
+
+      expect(validator.collect_violations(valid_user(name: "")).map(&:rule_id)).to eq(["string.min_len"])
+      expect(engine).to have_received(:compile).once
+    end
+
+    it "raises CompilationError before any message is validated" do
+      expect { validator.register(ProtovalidateSpec::BadRule) }
+        .to raise_error(Protovalidate::CompilationError, /overload/i)
+    end
+
+    it "raises TypeError for something that is not a message class" do
+      expect { validator.register(String) }.to raise_error(TypeError, /expected a Google::Protobuf message class/)
+    end
+
+    it "accepts several classes and is idempotent" do
+      engine = validator.instance_variable_get(:@engine)
+      allow(engine).to receive(:compile).and_call_original
+      2.times { validator.register(ProtovalidateSpec::User, ProtovalidateSpec::Address) }
+      expect(engine).to have_received(:compile).twice
+    end
+  end
+
+  describe "the registered fast path" do
+    it "looks up the descriptor only once per message class" do
+      allow(ProtovalidateSpec::User).to receive(:descriptor).and_call_original
+      3.times { validator.collect_violations(valid_user) }
+      expect(ProtovalidateSpec::User).to have_received(:descriptor).once
+    end
+
+    it "is safe to share between threads while other types register" do
+      validator.register(ProtovalidateSpec::User)
+      threads = 8.times.map do |i|
+        Thread.new do
+          50.times.map do |j|
+            invalid = (i + j).odd?
+            case j % 3
+            when 0
+              validator.collect_violations(ProtovalidateSpec::Address.new(city: invalid ? "" : "Tokyo")).size == (invalid ? 1 : 0)
+            when 1
+              validator.collect_violations(ProtovalidateSpec::RuntimeFailure.new(divisor: 1)).empty?
+            else
+              validator.collect_violations(valid_user(name: invalid ? "" : "alice")).size == (invalid ? 1 : 0)
+            end
+          end
+        end
+      end
+      expect(threads.flat_map(&:value)).to all(be(true))
+    end
+  end
+
   describe "descriptor_pool:" do
     it "validates messages defined in a custom pool" do
       pool = Google::Protobuf::DescriptorPool.new

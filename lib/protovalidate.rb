@@ -32,6 +32,16 @@ module Protovalidate
     validator.validate(message, fail_fast:)
   end
 
+  # Compiles the rules of message classes ahead of their first validation with
+  # the shared validator, for example at application boot.
+  #
+  # @param (see Validator#register)
+  # @return [void]
+  # @raise (see Validator#register)
+  def self.register(*message_classes)
+    validator.register(*message_classes)
+  end
+
   # Collects the violations of a message with the shared validator.
   #
   # @param (see Validator#collect_violations)
