@@ -255,7 +255,7 @@ jobs:
       - name: Check the extensions
         run: |
           set -o pipefail
-          for so in "tmp/$RCD_PLATFORM"/stage/lib/protovalidate/*/protovalidate_native.so; do
+          for so in "$STAGE_DIR"/*/protovalidate_native.so; do
             echo "== $so"
             readelf -d "$so" | grep NEEDED
             case "$PLATFORM" in
@@ -272,7 +272,8 @@ jobs:
           done
         env:
           PLATFORM: ${{ matrix.platform }}
-          RCD_PLATFORM: ${{ matrix.rcd_platform }}
+          # Not RCD_PLATFORM: the image's BASH_ENV script exports its own.
+          STAGE_DIR: tmp/${{ matrix.rcd_platform }}/stage/lib/protovalidate
 
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
