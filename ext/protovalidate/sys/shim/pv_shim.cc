@@ -154,6 +154,43 @@ struct pv_engine {
       ABSL_GUARDED_BY(compiled_mutex);
 };
 
+namespace {
+
+const google::protobuf::Descriptor* FindMessageType(pv_engine* engine,
+                                                    absl::string_view name,
+                                                    char** error) {
+  const google::protobuf::Descriptor* descriptor =
+      engine->pool.FindMessageTypeByName(name);
+  if (descriptor == nullptr) {
+    SetError(error, absl::StrCat("unknown message type: ", name));
+  }
+  return descriptor;
+}
+
+// Compiles the rules reachable from `descriptor` unless a previous call
+// already did. Compilation holds protovalidate-cc's own writer lock, so
+// concurrent validations wait for it; only the first call per type pays.
+int EnsureCompiled(pv_engine* engine,
+                   const google::protobuf::Descriptor* descriptor,
+                   char** error) {
+  {
+    absl::ReaderMutexLock lock(&engine->compiled_mutex);
+    if (engine->compiled.contains(descriptor)) return PV_OK;
+  }
+  absl::flat_hash_set<const google::protobuf::Descriptor*> seen;
+  absl::Status compiled =
+      CompileRules(*engine->validator_factory, descriptor, seen);
+  if (!compiled.ok()) {
+    SetError(error, std::string(compiled.message()));
+    return PV_ERR_COMPILATION;
+  }
+  absl::WriterMutexLock lock(&engine->compiled_mutex);
+  engine->compiled.insert(descriptor);
+  return PV_OK;
+}
+
+}  // namespace
+
 extern "C" {
 
 pv_engine* pv_engine_new(char** error) {
@@ -192,33 +229,24 @@ int pv_engine_add_file(pv_engine* engine, const uint8_t* file_descriptor_proto,
   return PV_OK;
 }
 
+int pv_engine_compile(pv_engine* engine, const char* type_name,
+                      size_t type_name_len, char** error) {
+  const google::protobuf::Descriptor* descriptor =
+      FindMessageType(engine, absl::string_view(type_name, type_name_len), error);
+  if (descriptor == nullptr) return PV_ERR_ARGUMENT;
+  return EnsureCompiled(engine, descriptor, error);
+}
+
 int pv_engine_validate(pv_engine* engine, const char* type_name,
                        size_t type_name_len, const uint8_t* payload,
                        size_t payload_len, int fail_fast, uint8_t** out,
                        size_t* out_len, char** error) {
   absl::string_view name(type_name, type_name_len);
   const google::protobuf::Descriptor* descriptor =
-      engine->pool.FindMessageTypeByName(name);
-  if (descriptor == nullptr) {
-    SetError(error, absl::StrCat("unknown message type: ", name));
-    return PV_ERR_ARGUMENT;
-  }
-
-  bool known;
-  {
-    absl::ReaderMutexLock lock(&engine->compiled_mutex);
-    known = engine->compiled.contains(descriptor);
-  }
-  if (!known) {
-    absl::flat_hash_set<const google::protobuf::Descriptor*> seen;
-    absl::Status compiled =
-        CompileRules(*engine->validator_factory, descriptor, seen);
-    if (!compiled.ok()) {
-      SetError(error, std::string(compiled.message()));
-      return PV_ERR_COMPILATION;
-    }
-    absl::WriterMutexLock lock(&engine->compiled_mutex);
-    engine->compiled.insert(descriptor);
+      FindMessageType(engine, name, error);
+  if (descriptor == nullptr) return PV_ERR_ARGUMENT;
+  if (int code = EnsureCompiled(engine, descriptor, error); code != PV_OK) {
+    return code;
   }
 
   google::protobuf::Arena arena;

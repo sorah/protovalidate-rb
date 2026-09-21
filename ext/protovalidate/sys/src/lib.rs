@@ -28,6 +28,12 @@ unsafe extern "C" {
         len: usize,
         error: *mut *mut c_char,
     ) -> c_int;
+    fn pv_engine_compile(
+        engine: *mut PvEngine,
+        type_name: *const c_char,
+        type_name_len: usize,
+        error: *mut *mut c_char,
+    ) -> c_int;
     fn pv_engine_validate(
         engine: *mut PvEngine,
         type_name: *const c_char,
@@ -98,6 +104,25 @@ impl Engine {
         let mut error: *mut c_char = ptr::null_mut();
         let code =
             unsafe { pv_engine_add_file(self.0, bytes.as_ptr(), bytes.len(), &raw mut error) };
+        if code == PV_OK {
+            Ok(())
+        } else {
+            Err(unsafe { status_error(code, error) })
+        }
+    }
+
+    /// Compiles the rules of `type_name` and of every message type reachable
+    /// from it, ahead of the first `validate`.
+    pub fn compile(&self, type_name: &str) -> Result<(), PvError> {
+        let mut error: *mut c_char = ptr::null_mut();
+        let code = unsafe {
+            pv_engine_compile(
+                self.0,
+                type_name.as_ptr().cast::<c_char>(),
+                type_name.len(),
+                &raw mut error,
+            )
+        };
         if code == PV_OK {
             Ok(())
         } else {

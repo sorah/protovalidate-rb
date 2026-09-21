@@ -60,6 +60,17 @@ void pv_engine_free(pv_engine* engine);
 int pv_engine_add_file(pv_engine* engine, const uint8_t* file_descriptor_proto,
                        size_t len, char** error);
 
+// Compiles the rules of the fully-qualified message type named by `type_name`
+// and `type_name_len`, and of every message type reachable from its fields,
+// so that a later pv_engine_validate finds them ready. pv_engine_validate
+// compiles on demand as well; this only moves the work earlier. The name need
+// not be NUL-terminated.
+//
+// Returns PV_OK, PV_ERR_ARGUMENT for an unknown type, or PV_ERR_COMPILATION
+// with a malloc'd message in *error.
+int pv_engine_compile(pv_engine* engine, const char* type_name,
+                      size_t type_name_len, char** error);
+
 // Validates `payload`, a serialized message of the fully-qualified type named
 // by `type_name` and `type_name_len`. The name need not be NUL-terminated:
 // the pool lookup takes a string view, so callers pass their own string
