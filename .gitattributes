@@ -1,0 +1,12 @@
+ext/protovalidate/sys/third_party/** linguist-vendored
+
+# script/extract-native-sources
+ext/protovalidate/sys/gen/** linguist-generated
+ext/protovalidate/sys/filelists/*.txt linguist-generated
+
+# rake proto:generate
+lib/buf/validate/validate_pb.rb linguist-generated
+spec/gen/** linguist-generated
+
+# Compiled descriptor set of spec/proto
+spec/fixtures/spec_messages.fdset linguist-generated
