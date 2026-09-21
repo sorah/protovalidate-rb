@@ -136,6 +136,27 @@ fn patch_for_mingw(path: PathBuf) -> PathBuf {
     patched
 }
 
+/// Lets rustc find an archive that ships with the C++ compiler; rustc
+/// resolves `static=` libraries itself rather than asking the compiler.
+fn add_archive_search_path(compiler: &cc::Tool, archive: &str) {
+    let output = compiler
+        .to_command()
+        .arg(format!("-print-file-name={archive}"))
+        .output()
+        .expect("run the C++ compiler");
+    let path = PathBuf::from(String::from_utf8(output.stdout).expect("utf-8").trim());
+    // An archive the compiler does not know comes back as the bare name.
+    assert!(path.is_absolute(), "the C++ compiler has no {archive}");
+    let dir = path.parent().expect("archive directory");
+    println!("cargo::rustc-link-search=native={}", dir.display());
+}
+
+/// Links an archive that ships with the C++ compiler into the extension.
+fn link_static_archive(compiler: &cc::Tool, name: &str) {
+    add_archive_search_path(compiler, &format!("lib{name}.a"));
+    println!("cargo::rustc-link-lib=static={name}");
+}
+
 /// One static library built from the C++ sources.
 struct CxxLib {
     name: String,
@@ -250,28 +271,19 @@ fn main() {
     antlr4_lib.compile();
     absl_lib.compile();
 
-    // rustc resolves the static archives itself, so it needs the compiler's
-    // library directories.
+    let compiler = absl_lib.build.get_compiler();
     if link_libstdcxx_statically() {
-        let mut archives = vec!["libstdc++.a"];
+        add_archive_search_path(&compiler, "libstdc++.a");
         // MinGW's libstdc++ implements threads on winpthreads, whose DLL is
         // no more on Ruby's PATH than libstdc++'s.
         if target_is_mingw() {
-            println!("cargo::rustc-link-lib=static=winpthread");
-            archives.push("libwinpthread.a");
+            link_static_archive(&compiler, "winpthread");
         }
-        for archive in archives {
-            let output = absl_lib
-                .build
-                .get_compiler()
-                .to_command()
-                .arg(format!("-print-file-name={archive}"))
-                .output()
-                .expect("run the C++ compiler");
-            let path = PathBuf::from(String::from_utf8(output.stdout).expect("utf-8").trim());
-            let dir = path.parent().expect("archive directory");
-            println!("cargo::rustc-link-search=native={}", dir.display());
-        }
+    }
+    // 32-bit ARM has no 64-bit atomic instructions, so GCC calls out to
+    // libatomic, which distributions do not always install.
+    if env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("arm") {
+        link_static_archive(&compiler, "atomic");
     }
 
     // abseil's sysinfo.cc reads the CPU frequency from the registry; bazel
