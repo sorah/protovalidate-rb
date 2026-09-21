@@ -117,6 +117,9 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read
+    env:
+      # Ruby comes from setup-ruby, which also caches the bundle.
+      MISE_DISABLE_TOOLS: ruby
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
@@ -132,9 +135,7 @@ jobs:
       - uses: bufbuild/buf-action@8c6a16e16f12ba20b6470afa9c2ba9b5ba8c97c3 # v1.5.0
         with:
           setup_only: true
-      - run: bundle exec rubocop
       - run: bundle exec rake yard:check
-      - run: cargo fmt --manifest-path ext/protovalidate/Cargo.toml --check
       # Lints the Rust sources without compiling the vendored C++.
       - run: cargo clippy --manifest-path ext/protovalidate/Cargo.toml --all-targets -- -D warnings
         env:
@@ -143,8 +144,6 @@ jobs:
         run: |
           bundle exec rake proto:generate
           git diff --exit-code
-      # Scoped to our workflows: the checkout also holds gems under vendor/bundle.
-      - uses: zizmorcore/zizmor-action@cc914d7f3750a2d13d75c7f184a1060aa0e9d482 # v0.6.4
-        with:
-          inputs: .github/workflows
-          advanced-security: false
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+      # steep runs in its own job, which prepares the rbs collection it needs.
+      - run: hk check --all --skip-step steep

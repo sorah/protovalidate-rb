@@ -2,7 +2,8 @@ amends "package://github.com/jdx/hk/releases/download/v1.53.0/hk@1.53.0#/Config.
 import "package://github.com/jdx/hk/releases/download/v1.53.0/hk@1.53.0#/Builtins.pkl"
 
 // Generated code is checked as generated; only hand-written files get linted.
-exclude = List("ext/protovalidate/sys/gen/**", "spec/gen/**", "lib/buf/**", "spec/fixtures/**")
+// vendor/bundle is where setup-ruby installs gems in CI.
+exclude = List("ext/protovalidate/sys/gen/**", "spec/gen/**", "lib/buf/**", "spec/fixtures/**", "vendor/**")
 
 local linters = new Mapping<String, Step> {
   ["rubocop"] {
