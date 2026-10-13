@@ -136,8 +136,7 @@ fn patch_for_mingw(path: PathBuf) -> PathBuf {
     patched
 }
 
-/// Lets rustc find an archive that ships with the C++ compiler; rustc
-/// resolves `static=` libraries itself rather than asking the compiler.
+/// Puts an archive that ships with the C++ compiler on the link search path.
 fn add_archive_search_path(compiler: &cc::Tool, archive: &str) {
     let output = compiler
         .to_command()
@@ -152,9 +151,11 @@ fn add_archive_search_path(compiler: &cc::Tool, archive: &str) {
 }
 
 /// Links an archive that ships with the C++ compiler into the extension.
+/// It is left unbundled like cc's static C++ stdlib, so it follows that on
+/// the final link line and resolves the stdlib's references too.
 fn link_static_archive(compiler: &cc::Tool, name: &str) {
     add_archive_search_path(compiler, &format!("lib{name}.a"));
-    println!("cargo::rustc-link-lib=static={name}");
+    println!("cargo::rustc-link-lib=static:-bundle={name}");
 }
 
 /// One static library built from the C++ sources.
