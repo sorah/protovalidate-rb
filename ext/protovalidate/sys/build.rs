@@ -136,8 +136,7 @@ fn patch_for_mingw(path: PathBuf) -> PathBuf {
     patched
 }
 
-/// Lets rustc find an archive that ships with the C++ compiler; rustc
-/// resolves `static=` libraries itself rather than asking the compiler.
+/// Puts an archive that ships with the C++ compiler on the link search path.
 fn add_archive_search_path(compiler: &cc::Tool, archive: &str) {
     let output = compiler
         .to_command()
@@ -152,9 +151,11 @@ fn add_archive_search_path(compiler: &cc::Tool, archive: &str) {
 }
 
 /// Links an archive that ships with the C++ compiler into the extension.
+/// It is left unbundled like cc's static C++ stdlib, so it follows that on
+/// the final link line and resolves the stdlib's references too.
 fn link_static_archive(compiler: &cc::Tool, name: &str) {
     add_archive_search_path(compiler, &format!("lib{name}.a"));
-    println!("cargo::rustc-link-lib=static={name}");
+    println!("cargo::rustc-link-lib=static:-bundle={name}");
 }
 
 /// One static library built from the C++ sources.
@@ -207,6 +208,13 @@ impl CxxLib {
     fn antlr4_defines(&mut self) -> &mut Self {
         self.build.define("ANTLR4CPP_STATIC", None);
         self.build.define("ANTLR4CPP_USING_ABSEIL", None);
+        self
+    }
+
+    /// Leaves linking the C++ stdlib to another library. cc emits a static
+    /// stdlib once per `cc::Build`, and rustc rejects one named twice.
+    fn skip_cpp_stdlib(&mut self) -> &mut Self {
+        self.build.cpp_link_stdlib(None);
         self
     }
 
@@ -263,7 +271,16 @@ fn main() {
 
     // Static archives must precede the archives they reference on the link
     // line, so compile (and therefore emit link directives) most-dependent
-    // first.
+    // first. absl comes last and alone links the C++ stdlib, after them all.
+    for lib in [
+        &mut pv_lib,
+        &mut celcpp_lib,
+        &mut protobuf_lib,
+        &mut re2_lib,
+        &mut antlr4_lib,
+    ] {
+        lib.skip_cpp_stdlib();
+    }
     pv_lib.compile();
     celcpp_lib.compile();
     protobuf_lib.compile();
