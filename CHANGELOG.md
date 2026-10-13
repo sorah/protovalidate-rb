@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.0 (2026-10-14)
+
+- Graduate beta.
+
 ## 0.1.0.beta3 (2026-09-22)
 
 - `Protovalidate.register` and `Validator#register` compile the rules of message types ahead of their first validation, so the compilation, which blocks concurrent validations, can run at boot instead of inside a request. `register_all` does the same for every loaded message class.
