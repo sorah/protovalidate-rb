@@ -210,6 +210,13 @@ impl CxxLib {
         self
     }
 
+    /// Leaves linking the C++ stdlib to another library. cc emits a static
+    /// stdlib once per `cc::Build`, and rustc rejects one named twice.
+    fn skip_cpp_stdlib(&mut self) -> &mut Self {
+        self.build.cpp_link_stdlib(None);
+        self
+    }
+
     fn compile(&mut self) {
         self.build.compile(&self.name);
     }
@@ -263,7 +270,16 @@ fn main() {
 
     // Static archives must precede the archives they reference on the link
     // line, so compile (and therefore emit link directives) most-dependent
-    // first.
+    // first. absl comes last and alone links the C++ stdlib, after them all.
+    for lib in [
+        &mut pv_lib,
+        &mut celcpp_lib,
+        &mut protobuf_lib,
+        &mut re2_lib,
+        &mut antlr4_lib,
+    ] {
+        lib.skip_cpp_stdlib();
+    }
     pv_lib.compile();
     celcpp_lib.compile();
     protobuf_lib.compile();
